@@ -1,0 +1,28 @@
+---
+// src/layouts/PortalLayout.astro
+import Navbar from '../components/Navbar.astro';
+
+interface Props {
+  title: string;
+  portalTitle?: string;
+}
+
+const { title, portalTitle } = Astro.props;
+---
+
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} - Banjar Adat Dharma Sadhu Dukuh</title>
+  </head>
+  <body class="bg-slate-900 text-slate-100 min-h-screen flex flex-col">
+    <!-- Navbar dengan Tombol Logout Bawaan -->
+    <Navbar portalTitle={portalTitle} />
+
+    <!-- Isi Halaman Portal -->
+    <main class="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8">
+      <slot />
+    </main>
+  </body>
+</html>

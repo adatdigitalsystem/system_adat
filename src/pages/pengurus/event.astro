@@ -1,0 +1,121 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { formatRupiah } from '../../lib/utils';
+
+let message = '';
+let isError = false;
+
+// Handle Form Submission untuk Membuat Event Adat Baru
+if (Astro.request.method === 'POST') {
+  try {
+    const formData = await Astro.request.formData();
+    const nama_kejadian = formData.get('nama_kejadian') as string;
+    const jenis_kewajiban_id = formData.get('jenis_kewajiban_id') as string;
+    const tanggal_kejadian = formData.get('tanggal_kejadian') as string;
+    const nominal_tagihan = parseFloat(formData.get('nominal_tagihan') as string);
+    const keterangan = formData.get('keterangan') as string;
+
+    // 1. Insert Kejadian Adat
+    const { data: eventData, error: eventError } = await supabase
+      .from('kejadian_adat')
+      .insert([
+        { nama_kejadian, jenis_kewajiban_id, tanggal_kejadian, nominal_tagihan, keterangan }
+      ])
+      .select()
+      .single();
+
+    if (eventError) throw eventError;
+
+    // 2. Fetch seluruh Anggota Aktif Banjar
+    const { data: kramaList, error: kramaError } = await supabase
+      .from('anggota')
+      .select('id')
+      .eq('status_krama', 'AKTIF')
+      .eq('is_active', true);
+
+    if (kramaError) throw kramaError;
+
+    // 3. Batch Generate Tagihan untuk Anggota Aktif
+    if (kramaList && kramaList.length > 0) {
+      const tagihanPayload = kramaList.map((krama) => ({
+        anggota_id: krama.id,
+        kejadian_adat_id: eventData.id,
+        jenis_kewajiban_id,
+        total_nominal: nominal_tagihan,
+        jumlah_dibayar: 0,
+        status_bayar: 'UNPAID',
+        tanggal_kejadian,
+        keterangan: `${nama_kejadian} - ${keterangan || 'Kewajiban Adat'}`
+      }));
+
+      const { error: tagihanError } = await supabase
+        .from('tagihan_krama')
+        .insert(tagihanPayload);
+
+      if (tagihanError) throw tagihanError;
+    }
+
+    message = 'Acara adat dan tagihan krama berhasil diterbitkan!';
+  } catch (err: any) {
+    isError = true;
+    message = err.message || 'Gagal menerbitkan acara adat.';
+  }
+}
+
+// Fetch Jenis Kewajiban Master Data
+const { data: masterKewajiban } = await supabase.from('jenis_kewajiban').select('*');
+---
+
+<LayoutDashboard title="Buat Event Adat - Banjar Adat Dharma Sadhu Dukuh">
+  <div class="max-w-3xl mx-auto p-4 space-y-6">
+    {message && (
+      <div class={`p-4 rounded-xl text-sm font-semibold ${isError ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'}`}>
+        {message}
+      </div>
+    )}
+
+    <div class="bg-white p-6 rounded-xl shadow-md border border-slate-100 space-y-4">
+      <h2 class="text-xl font-bold text-slate-800">Terbitkan Acara Adat Baru (Patus/Penyaksi/Piodalan)</h2>
+      <p class="text-xs text-slate-500">Menerbitkan acara baru akan secara otomatis menambahkan kewajiban tagihan kepada seluruh anggota Ngayah.</p>
+
+      <form method="POST" class="space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Nama Acara / Kejadian Adat</label>
+          <input type="text" name="nama_kejadian" placeholder="Contoh: Uang Penyaksi - Pernikahan I Made A" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-red-500" required />
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Kategori Kewajiban</label>
+            <select name="jenis_kewajiban_id" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-red-500" required>
+              <option value="">-- Pilih Jenis --</option>
+              {masterKewajiban?.map((k) => (
+                <option value={k.id}>{k.nama_kewajiban} (Default: {formatRupiah(k.nominal_default)})</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Nominal Tagihan per Krama (Rp)</label>
+            <input type="number" name="nominal_tagihan" defaultValue="10000" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-red-500" required />
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Tanggal Acara / Kejadian</label>
+          <input type="date" name="tanggal_kejadian" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-red-500" required />
+        </div>
+
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 uppercase mb-1">Keterangan / Catatan Tambahan</label>
+          <textarea name="keterangan" rows="2" placeholder="Catatan lokasi atau rincian sangkep/acara" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-red-500"></textarea>
+        </div>
+
+        <button type="submit" class="w-full bg-red-800 hover:bg-red-900 text-white font-bold py-3 rounded-lg text-sm shadow transition">
+          Terbitkan Acara & Buat Tagihan Krama
+        </button>
+      </form>
+    </div>
+  </div>
+</LayoutDashboard>

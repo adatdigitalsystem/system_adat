@@ -1,0 +1,332 @@
+---
+import LayoutDashboard from '../layouts/LayoutDashboard.astro';
+import { getGoogleDriveImageUrl } from '../lib/googleDrivePublic';
+import { createSupabaseAdminClient } from '../lib/supabaseAdmin';
+import { supabase } from '../lib/supabase';
+import { labelStatusKeanggotaan } from '../lib/utils';
+import PrintReportButton from '../components/common/PrintReportButton.astro';
+import ProfilePhoto from '../components/common/ProfilePhoto.astro';
+
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+if (!accessToken) return Astro.redirect('/login');
+
+const { data: { user } } = await supabase.auth.getUser(accessToken);
+if (!user) return Astro.redirect('/login');
+
+const { data: viewer } = await supabase
+  .from('anggota')
+  .select('role')
+  .eq('user_id', user.id)
+  .maybeSingle();
+
+const viewerRole = (viewer?.role || '').toUpperCase().replace(/[\s_-]/g, '');
+if (!['ADMIN', 'PENGURUS', 'BENDAHARA'].includes(viewerRole)) {
+  return Astro.redirect('/krama/dashboard');
+}
+
+const dataClient = createSupabaseAdminClient();
+const [{ data: anggotaList, error: anggotaError }, { data: tagihanList, error: tagihanError }] = await Promise.all([
+  dataClient.from('anggota').select('*').order('nama_lengkap', { ascending: true }),
+  dataClient.from('tagihan_krama').select('anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar'),
+]);
+
+const errorMessage = anggotaError?.message || tagihanError?.message || '';
+const anggota = anggotaList || [];
+const statusBelumLunas = new Set(['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
+const saldoByAnggota = new Map<string, number>();
+
+for (const tagihan of tagihanList || []) {
+  if (!statusBelumLunas.has((tagihan.status_bayar || '').toUpperCase())) continue;
+  const anggotaId = tagihan.anggota_id;
+  if (!anggotaId) continue;
+  const nominal = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+  const dibayar = Number(tagihan.jumlah_dibayar || 0);
+  saldoByAnggota.set(anggotaId, (saldoByAnggota.get(anggotaId) || 0) + Math.max(0, nominal - dibayar));
+}
+
+const totalTunggakan = anggota.reduce((total, item) => total + (saldoByAnggota.get(item.id) || 0), 0);
+const totalAktif = anggota.filter((item) => !item.status_aktif || item.status_aktif === 'AKTIF').length;
+const formatRupiah = (value: number) => new Intl.NumberFormat('id-ID', {
+  style: 'currency',
+  currency: 'IDR',
+  maximumFractionDigits: 0,
+}).format(value || 0);
+const formatTanggal = (value: string | null | undefined) => {
+  if (!value) return '-';
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('id-ID');
+};
+---
+
+<LayoutDashboard title="Daftar Seluruh Krama - Banjar Adat" role={viewer?.role || 'PENGURUS'}>
+  <main class="mx-auto max-w-7xl space-y-6 px-4 sm:px-6 lg:px-8">
+    <header class="flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900 p-6 text-white sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p class="text-xs font-bold uppercase text-amber-400">Direktori Banjar</p>
+        <h1 class="mt-1 text-2xl font-black">Seluruh Anggota Krama</h1>
+      </div>
+      <PrintReportButton targetId="directory-report" title="Daftar Seluruh Anggota Krama" />
+    </header>
+
+    <section class="grid grid-cols-1 gap-3 sm:grid-cols-3" aria-label="Ringkasan anggota">
+      <div class="rounded-lg border border-slate-200 bg-white p-4">
+        <p class="text-xs text-slate-500">Total anggota</p>
+        <p class="mt-1 text-xl font-black text-slate-900">{anggota.length}</p>
+      </div>
+      <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+        <p class="text-xs text-emerald-800">Anggota Ngayah</p>
+        <p class="mt-1 text-xl font-black text-emerald-950">{totalAktif}</p>
+      </div>
+      <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+        <p class="text-xs text-amber-800">Total saldo kewajiban belum lunas</p>
+        <p class="mt-1 text-xl font-black text-amber-950">{formatRupiah(totalTunggakan)}</p>
+      </div>
+    </section>
+
+    {errorMessage && (
+      <p role="alert" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-800">
+        Gagal memuat direktori anggota: {errorMessage}
+      </p>
+    )}
+
+    <section id="directory-report" class="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 class="text-base font-bold text-slate-900">Data dan saldo kewajiban</h2>
+          <p id="member-count" class="mt-1 text-xs text-slate-500" aria-live="polite">Menampilkan {anggota.length} anggota</p>
+        </div>
+        <label class="w-full space-y-1 sm:max-w-sm">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Cari anggota</span>
+          <input id="member-search" type="search" placeholder="Nama, nomor HP, alamat, regu..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full min-w-295 text-left text-xs text-slate-600">
+          <thead class="border-b border-slate-200 bg-slate-50 text-[10px] uppercase text-slate-500">
+            <tr>
+              <th class="p-3" aria-sort="ascending">
+                <button type="button" data-directory-sort="name" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Anggota <span data-directory-sort-indicator aria-hidden="true">↑</span>
+                </button>
+              </th>
+              <th class="p-3" aria-sort="none">
+                <button type="button" data-directory-sort="status-role" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Status / Role <span data-directory-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3" aria-sort="none">
+                <button type="button" data-directory-sort="regu-tempekan" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Regu / Tempekan <span data-directory-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3">Kontak</th>
+              <th class="p-3">Alamat</th>
+              <th class="p-3">Tanggal lahir</th>
+              <th class="p-3" aria-sort="none">
+                <button type="button" data-directory-sort="marital" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Perkawinan <span data-directory-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3 text-right">Saldo kewajiban</th>
+            </tr>
+          </thead>
+          <tbody id="member-rows" class="divide-y divide-slate-100">
+            {anggota.map((item) => {
+              const foto = getGoogleDriveImageUrl(item.foto_url || item.foto || item.foto_drive_id);
+              const saldo = saldoByAnggota.get(item.id) || 0;
+              const searchText = [item.nama_lengkap, item.no_hp, item.email, item.alamat, item.no_regu, item.tempekan, item.role, item.status_aktif]
+                .filter(Boolean)
+                .join(' ')
+                .toLocaleLowerCase('id-ID');
+              return (
+                <tr
+                  class="member-row hover:bg-slate-50"
+                  data-search={searchText}
+                  data-sort-name={item.nama_lengkap || ''}
+                  data-sort-status-role={`${labelStatusKeanggotaan(item.status_aktif)} ${item.role || 'KRAMA'}`}
+                  data-sort-regu-tempekan={`${item.no_regu || ''} ${item.tempekan || ''}`}
+                  data-sort-marital={item.status_perkawinan?.replaceAll('_', ' ') || ''}
+                >
+                  <td class="p-3">
+                    <div class="flex items-center gap-3">
+                      <ProfilePhoto
+                        src={foto}
+                        alt={`Foto ${item.nama_lengkap || 'anggota'}`}
+                        fallbackText={item.nama_lengkap?.trim().charAt(0).toLocaleUpperCase('id-ID') || '?'}
+                        className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-200"
+                        imageClass="h-full w-full object-cover"
+                        fallbackClass="flex h-full w-full items-center justify-center rounded-full text-sm font-bold text-slate-600"
+                      />
+                      <div class="min-w-0">
+                        <a href={`/krama/detail?id=${item.id}`} class="font-bold text-blue-700 hover:underline">{item.nama_lengkap || 'Tanpa nama'}</a>
+                        <p class="mt-0.5 text-[10px] text-slate-500">No. Krama: {item.nik_no_krama || '-'}</p>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="p-3">
+                    <p class={`font-semibold ${item.status_aktif === 'TIDAK_AKTIF' ? 'text-red-700' : item.status_aktif === 'BELUM_DILENGKAPI' ? 'text-slate-500' : 'text-emerald-700'}`}>{labelStatusKeanggotaan(item.status_aktif)}</p>
+                    <p class="mt-1 text-slate-500">{item.role || 'KRAMA'}</p>
+                  </td>
+                  <td class="p-3">
+                    <p>Regu {item.no_regu || '-'}</p>
+                    <p class="mt-1 text-slate-500">{item.tempekan || '-'}</p>
+                  </td>
+                  <td class="p-3">
+                    <p>{item.no_hp || '-'}</p>
+                    <p class="mt-1 max-w-52 break-all text-slate-500">{item.email || '-'}</p>
+                  </td>
+                  <td class="max-w-56 whitespace-pre-wrap p-3">{item.alamat || '-'}</td>
+                  <td class="whitespace-nowrap p-3">{formatTanggal(item.tanggal_lahir)}</td>
+                  <td class="p-3">{item.status_perkawinan?.replaceAll('_', ' ') || '-'}</td>
+                  <td class={`whitespace-nowrap p-3 text-right font-bold ${saldo > 0 ? 'text-amber-800' : 'text-emerald-700'}`}>{formatRupiah(saldo)}</td>
+                </tr>
+              );
+            })}
+            <tr id="member-empty" class="hidden">
+              <td colspan="8" class="p-8 text-center text-slate-500">Tidak ada anggota yang cocok dengan pencarian.</td>
+            </tr>
+            {!anggota.length && !errorMessage && (
+              <tr><td colspan="8" class="p-8 text-center text-slate-500">Belum ada data anggota.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <nav id="member-pagination" class="no-print flex flex-wrap justify-center gap-1 border-t border-slate-200 pt-4" aria-label="Navigasi halaman direktori krama" aria-live="polite"></nav>
+    </section>
+  </main>
+</LayoutDashboard>
+
+<script>
+  const searchInput = document.querySelector<HTMLInputElement>('#member-search');
+  let memberRows = Array.from(document.querySelectorAll<HTMLTableRowElement>('.member-row'));
+  const memberCount = document.querySelector<HTMLElement>('#member-count');
+  const emptyRow = document.querySelector<HTMLElement>('#member-empty');
+  const pagination = document.querySelector<HTMLElement>('#member-pagination');
+  const sortButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-directory-sort]'));
+  const pageSize = 10;
+  let currentPage = 1;
+  let activeSortField = 'name';
+  let activeSortDirection: 'asc' | 'desc' = 'asc';
+
+  const renderDirectory = () => {
+    const query = searchInput?.value.trim().toLocaleLowerCase('id-ID') || '';
+    const matchingRows = memberRows.filter((row) => (row.dataset.search || '').includes(query));
+    const totalPages = Math.max(1, Math.ceil(matchingRows.length / pageSize));
+    currentPage = Math.min(Math.max(1, currentPage), totalPages);
+    const firstIndex = (currentPage - 1) * pageSize;
+    const lastIndex = Math.min(firstIndex + pageSize, matchingRows.length);
+
+    memberRows.forEach((row) => {
+      row.classList.add('hidden');
+    });
+
+    matchingRows.slice(firstIndex, lastIndex).forEach((row) => row.classList.remove('hidden'));
+    if (memberCount) {
+      memberCount.textContent = matchingRows.length
+        ? `Menampilkan ${firstIndex + 1}-${lastIndex} dari ${matchingRows.length} anggota`
+        : `Menampilkan 0 dari 0 anggota`;
+    }
+    emptyRow?.classList.toggle('hidden', matchingRows.length > 0 || memberRows.length === 0);
+
+    if (!pagination) return;
+    pagination.replaceChildren();
+    let visiblePages: Array<number | 'ellipsis'>;
+    if (totalPages <= 7) {
+      visiblePages = Array.from({ length: totalPages }, (_, index) => index + 1);
+    } else if (currentPage <= 4) {
+      visiblePages = [1, 2, 3, 4, 5, 'ellipsis', totalPages];
+    } else if (currentPage >= totalPages - 3) {
+      visiblePages = [1, 'ellipsis', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+    } else {
+      visiblePages = [1, 'ellipsis', currentPage - 1, currentPage, currentPage + 1, 'ellipsis', totalPages];
+    }
+
+    const createArrow = (direction: 'previous' | 'next') => {
+      const isPrevious = direction === 'previous';
+      const arrow = document.createElement('button');
+      arrow.type = 'button';
+      arrow.textContent = isPrevious ? '←' : '→';
+      arrow.setAttribute('aria-label', isPrevious ? 'Halaman sebelumnya' : 'Halaman berikutnya');
+      arrow.title = isPrevious ? 'Halaman sebelumnya' : 'Halaman berikutnya';
+      const disabled = isPrevious ? currentPage === 1 : currentPage === totalPages;
+      arrow.disabled = disabled;
+      arrow.className = 'rounded-md border border-slate-300 px-3 py-1.5 text-sm font-semibold text-blue-700 transition hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40';
+      arrow.addEventListener('click', () => {
+        if (disabled) return;
+        currentPage += isPrevious ? -1 : 1;
+        renderDirectory();
+      });
+      return arrow;
+    };
+
+    pagination.append(createArrow('previous'));
+    visiblePages.forEach((page) => {
+      if (page === 'ellipsis') {
+        const ellipsis = document.createElement('span');
+        ellipsis.className = 'px-2 py-1 text-xs text-slate-400';
+        ellipsis.textContent = '…';
+        pagination.append(ellipsis);
+        return;
+      }
+
+      const pageLink = document.createElement('a');
+      pageLink.href = '#directory-report';
+      pageLink.textContent = String(page);
+      pageLink.setAttribute('aria-label', `Halaman ${page}`);
+      pageLink.className = page === currentPage
+        ? 'rounded-md bg-blue-700 px-3 py-1.5 text-xs font-bold text-white'
+        : 'rounded-md px-3 py-1.5 text-xs font-semibold text-blue-700 hover:bg-blue-50 hover:underline';
+      if (page === currentPage) pageLink.setAttribute('aria-current', 'page');
+      pageLink.addEventListener('click', (event) => {
+        event.preventDefault();
+        currentPage = page;
+        renderDirectory();
+      });
+      pagination.append(pageLink);
+    });
+    pagination.append(createArrow('next'));
+  };
+
+  const sortDirectory = (field: string, direction: 'asc' | 'desc') => {
+    const dataField = `sort${field.split('-').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}`;
+    memberRows.sort((left, right) => {
+      const leftValue = left.dataset[dataField] || '';
+      const rightValue = right.dataset[dataField] || '';
+      const comparison = leftValue.localeCompare(rightValue, 'id', { sensitivity: 'base', numeric: true });
+      return direction === 'asc' ? comparison : -comparison;
+    });
+
+    const memberRowsContainer = document.querySelector<HTMLTableSectionElement>('#member-rows');
+    memberRows.forEach((row) => memberRowsContainer?.append(row));
+    activeSortField = field;
+    activeSortDirection = direction;
+    currentPage = 1;
+
+    sortButtons.forEach((button) => {
+      const selected = button.dataset.directorySort === field;
+      const header = button.closest('th');
+      if (header) header.setAttribute('aria-sort', selected ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      const indicator = button.querySelector<HTMLElement>('[data-directory-sort-indicator]');
+      if (indicator) indicator.textContent = selected ? (direction === 'asc' ? '↑' : '↓') : '↕';
+    });
+
+    renderDirectory();
+  };
+
+  sortButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const field = button.dataset.directorySort;
+      if (!field) return;
+      const direction = activeSortField === field && activeSortDirection === 'asc' ? 'desc' : 'asc';
+      sortDirectory(field, direction);
+    });
+  });
+
+  searchInput?.addEventListener('input', () => {
+    currentPage = 1;
+    renderDirectory();
+  });
+  sortDirectory(activeSortField, activeSortDirection);
+  renderDirectory();
+</script>

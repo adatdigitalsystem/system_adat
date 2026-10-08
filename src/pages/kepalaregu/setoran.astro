@@ -1,0 +1,185 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { formatRupiah } from '../../lib/utils';
+
+let message = '';
+let isSuccess = false;
+
+// Tangani aksi Form Submit (POST)
+if (Astro.request.method === 'POST') {
+  try {
+    const formData = await Astro.request.formData();
+    const actionType = formData.get('action_type');
+
+    if (actionType === 'BAYAR_TAGIHAN') {
+      const tagihanId = formData.get('tagihan_id')?.toString();
+      const nominalBayar = Number(formData.get('nominal_bayar'));
+      const anggotaId = formData.get('anggota_id')?.toString();
+
+      if (tagihanId && nominalBayar > 0) {
+        // 1. Simpan ke riwayat pembayaran
+        await supabase.from('riwayat_pembayaran_cicilan').insert({
+          tagihan_krama_id: tagihanId,
+          anggota_id: anggotaId,
+          nominal_bayar: nominalBayar,
+          metode_pembayaran: 'CASH_REGU',
+          keterangan: 'Pembayaran tunai via Kepala Regu'
+        });
+
+        // 2. Update status tagihan krama
+        const { data: tagihan } = await supabase
+          .from('tagihan_krama')
+          .select('total_nominal, jumlah_dibayar')
+          .eq('id', tagihanId)
+          .single();
+
+        if (tagihan) {
+          const totalBaru = Number(tagihan.jumlah_dibayar || 0) + nominalBayar;
+          const statusNew = totalBaru >= Number(tagihan.total_nominal) ? 'COLLECTED_BY_REGU' : 'PARTIAL';
+
+          await supabase.from('tagihan_krama').update({
+            jumlah_dibayar: totalBaru,
+            status_bayar: statusNew,
+            updated_at: new Date().toISOString()
+          }).eq('id', tagihanId);
+        }
+
+        message = 'Pembayaran tunai krama berhasil dicatat!';
+        isSuccess = true;
+      }
+    } else if (actionType === 'AJUKAN_SETORAN') {
+      const reguId = formData.get('regu_id')?.toString();
+      const kepalaReguId = formData.get('kepala_regu_id')?.toString();
+      const totalSetoran = Number(formData.get('total_setoran'));
+
+      if (reguId && totalSetoran > 0) {
+        await supabase.from('setoran_regu').insert({
+          regu_id: reguId,
+          kepala_regu_id: kepalaReguId,
+          total_nominal: totalSetoran,
+          status_verifikasi: 'PENDING',
+          keterangan: 'Pengajuan setoran tunai berkala regu'
+        });
+
+        message = 'Rekap setoran regu berhasil diajukan ke Bendahara!';
+        isSuccess = true;
+      }
+    }
+  } catch (err: any) {
+    message = err.message || 'Gagal memproses transaksi.';
+    isSuccess = false;
+  }
+}
+
+// Ambil daftar tagihan yang belum lunas (UNPAID / PARTIAL)
+const { data: listTagihan } = await supabase
+  .from('tagihan_krama')
+  .select(`
+    id, total_nominal, jumlah_dibayar, status_bayar, keterangan, anggota_id,
+    anggota ( id, nama_lengkap, regu_id, regu(nama_regu) )
+  `)
+  .in('status_bayar', ['UNPAID', 'PARTIAL']);
+
+// Ambil total dana terkeruk yang siap disetorkan ke Bendahara
+const { data: listKoleksi } = await supabase
+  .from('tagihan_krama')
+  .select('jumlah_dibayar')
+  .eq('status_bayar', 'COLLECTED_BY_REGU');
+
+const totalKoleksiSiapSetor = (listKoleksi || []).reduce((acc, curr) => acc + Number(curr.jumlah_dibayar || 0), 0);
+---
+
+<LayoutDashboard title="Input & Rekap Setoran - Kepala Regu">
+  <div class="max-w-6xl mx-auto p-4 space-y-6">
+    
+    <div class="flex justify-between items-center bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+      <div>
+        <h1 class="text-xl font-black text-slate-800">Pencatatan & Rekap Setoran Regu</h1>
+        <p class="text-xs text-slate-500">Terima pembayaran tunai krama dan ajukan rekap ke Bendahara</p>
+      </div>
+      <a href="/kepalaregu" class="text-xs font-bold text-slate-600 hover:text-slate-900 border px-3 py-2 rounded-lg">
+        ← Kembali
+      </a>
+    </div>
+
+    {message && (
+      <div class={`p-4 rounded-xl text-xs font-semibold ${isSuccess ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' : 'bg-red-100 text-red-800 border border-red-300'}`}>
+        {message}
+      </div>
+    )}
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      
+      <!-- Form 1: Input Pembayaran Tunai Krama -->
+      <div class="lg:col-span-2 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+        <h2 class="text-sm font-bold text-slate-800 uppercase tracking-wider border-b pb-2">
+          1. Input Bayar Tunai Krama
+        </h2>
+
+        <form method="POST" class="space-y-4">
+          <input type="hidden" name="action_type" value="BAYAR_TAGIHAN" />
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Pilih Krama & Tagihan</label>
+            <select name="tagihan_id" required class="w-full text-xs p-3 rounded-xl border border-slate-300 bg-slate-50 focus:outline-none focus:border-amber-500">
+              <option value="">-- Pilih Tagihan Krama --</option>
+              {listTagihan?.map((t: any) => (
+                <option value={t.id}>
+                  {t.anggota?.nama_lengkap} - {t.keterangan} (Sisa: {formatRupiah(Number(t.total_nominal) - Number(t.jumlah_dibayar || 0))})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Nominal Pembayaran (Rp)</label>
+              <input type="number" name="nominal_bayar" required placeholder="50000" class="w-full text-xs p-3 rounded-xl border border-slate-300 bg-slate-50 focus:outline-none focus:border-amber-500" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 uppercase mb-1">Metode</label>
+              <input type="text" value="CASH / Tunai Kepala Regu" disabled class="w-full text-xs p-3 rounded-xl border border-slate-200 bg-slate-100 text-slate-500" />
+            </div>
+          </div>
+
+          <button type="submit" class="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs shadow transition">
+            Simpan Pembayaran Tunai
+          </button>
+        </form>
+      </div>
+
+      <!-- Form 2: Pengajuan Rekap Setoran ke Bendahara -->
+      <div class="bg-slate-900 text-white p-6 rounded-2xl border border-slate-800 shadow-lg space-y-4 flex flex-col justify-between">
+        <div>
+          <h2 class="text-sm font-bold text-amber-400 uppercase tracking-wider border-b border-slate-800 pb-2">
+            2. Rekap Setoran ke Bendahara
+          </h2>
+
+          <div class="my-6 text-center space-y-1">
+            <p class="text-xs text-slate-400">Total Kas Terkumpul di Regu</p>
+            <p class="text-3xl font-black text-amber-400">{formatRupiah(totalKoleksiSiapSetor)}</p>
+            <p class="text-[10px] text-slate-500">Siap disetorkan & diverifikasi Bendahara</p>
+          </div>
+        </div>
+
+        <form method="POST" class="space-y-3">
+          <input type="hidden" name="action_type" value="AJUKAN_SETORAN" />
+          <input type="hidden" name="total_setoran" value={totalKoleksiSiapSetor} />
+          <!-- ID dummy regu/kepala regu untuk pengujian -->
+          <input type="hidden" name="regu_id" value="33333333-3333-3333-3333-333333333333" />
+          <input type="hidden" name="kepala_regu_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" />
+
+          <button 
+            type="submit" 
+            disabled={totalKoleksiSiapSetor <= 0}
+            class="w-full py-3 bg-amber-500 hover:bg-amber-600 disabled:bg-slate-800 disabled:text-slate-600 text-slate-950 font-bold rounded-xl text-xs transition shadow"
+          >
+            Ajukan Setoran ke Bendahara
+          </button>
+        </form>
+      </div>
+
+    </div>
+  </div>
+</LayoutDashboard>

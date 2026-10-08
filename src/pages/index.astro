@@ -1,0 +1,47 @@
+---
+import { supabase } from '../lib/supabase';
+
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+
+if (accessToken) {
+  const { data: { user } } = await supabase.auth.getUser(accessToken);
+
+  if (user) {
+    // 1. Ambil data role dari tabel anggota atau krama
+    const { data: anggota } = await supabase
+      .from('anggota')
+      .select('role')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    let rawRole = anggota?.role;
+
+    // Fallback jika profil tersimpan di tabel krama
+    if (!rawRole) {
+      const { data: krama } = await supabase
+        .from('krama')
+        .select('role')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      rawRole = krama?.role;
+    }
+
+    // 2. Normalisasi string role ke huruf kapital
+    const role = (rawRole || 'KRAMA').toUpperCase();
+
+    // 3. Routing dinamis sesuai role
+    if (role === 'ADMIN') {
+      return Astro.redirect('/admin/dashboard');
+    } else if (role === 'PENGURUS') {
+      return Astro.redirect('/pengurus/dashboard');
+    } else if (role === 'KEPALA_REGU' || role === 'KEPALA REGU' || role === 'KEPALA_REGU_TEMPEKAN') {
+      return Astro.redirect('/kepalaregu');
+    } else {
+      return Astro.redirect('/krama/dashboard');
+    }
+  }
+}
+
+// Jika belum login, arahkan ke halaman login
+return Astro.redirect('/login');
+---

@@ -1,0 +1,95 @@
+---
+import LayoutDashboard from '../../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../../lib/supabase';
+import { getGoogleDriveImageUrl } from '../../../lib/googleDrivePublic';
+import { labelStatusKeanggotaan } from '../../../lib/utils';
+import ProfilePhoto from '../../../components/common/ProfilePhoto.astro';
+
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+if (!accessToken) return Astro.redirect('/login');
+
+const { data: { user } } = await supabase.auth.getUser(accessToken);
+if (!user) return Astro.redirect('/login');
+
+const { data: viewer } = await supabase
+  .from('anggota')
+  .select('role, no_regu')
+  .eq('user_id', user.id)
+  .maybeSingle();
+
+const viewerRole = (viewer?.role || '').toUpperCase().replace(/[\\s_-]/g, '');
+const isAdmin = viewerRole === 'ADMIN';
+if (!isAdmin && !['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes(viewerRole)) {
+  return Astro.redirect('/krama/dashboard');
+}
+
+const { data: anggota, error } = await supabase
+  .from('anggota')
+  .select('*')
+  .eq('id', Astro.params.id)
+  .maybeSingle();
+
+if (error || !anggota || (!isAdmin && anggota.no_regu !== viewer?.no_regu)) {
+  return Astro.redirect('/kepalaregu');
+}
+
+const formatTanggal = (value: string | null | undefined) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('id-ID');
+};
+const profilePhoto = getGoogleDriveImageUrl(anggota.foto_url || anggota.foto || anggota.foto_drive_id);
+---
+
+<LayoutDashboard title={`Profil ${anggota.nama_lengkap} - Portal Kepala Regu`} role={isAdmin ? 'ADMIN' : 'KEPALA_REGU'}>
+  <main class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+    <a href="/kepalaregu" class="inline-flex items-center gap-2 text-sm font-semibold text-blue-700 hover:text-blue-900">
+      <span aria-hidden="true">&larr;</span> Kembali ke Daftar Regu
+    </a>
+
+    <section class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <header class="flex flex-col gap-5 border-b border-slate-200 bg-slate-900 p-6 text-white sm:flex-row sm:items-center">
+        <ProfilePhoto
+          src={profilePhoto}
+          alt={`Foto ${anggota.nama_lengkap}`}
+          fallbackText={anggota.nama_lengkap?.trim().charAt(0).toLocaleUpperCase('id-ID') || '?'}
+          className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-full border-2 border-white/30 bg-amber-500"
+          imageClass="h-full w-full object-cover"
+          fallbackClass="flex h-full w-full items-center justify-center rounded-full text-3xl font-black text-slate-950"
+        />
+        <div>
+          <p class="text-xs font-bold uppercase text-amber-300">Profil Anggota Regu {anggota.no_regu || '-'}</p>
+          <h1 class="mt-1 text-2xl font-black">{anggota.nama_lengkap}</h1>
+          <p class="mt-2 text-sm text-slate-300">{anggota.tempekan || 'Tempekan belum diisi'}</p>
+        </div>
+      </header>
+
+      <dl class="grid grid-cols-1 gap-x-8 sm:grid-cols-2">
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Status Keanggotaan</dt>
+          <dd class="mt-1 text-sm font-semibold text-slate-900">{labelStatusKeanggotaan(anggota.status_aktif)}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Role</dt>
+          <dd class="mt-1 text-sm font-semibold text-slate-900">{anggota.role || 'KRAMA'}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Nomor HP</dt>
+          <dd class="mt-1 text-sm text-slate-900">{anggota.no_hp || '-'}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Tempekan</dt>
+          <dd class="mt-1 text-sm text-slate-900">{anggota.tempekan || '-'}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5 sm:col-span-2">
+          <dt class="text-xs font-bold uppercase text-slate-500">Alamat</dt>
+          <dd class="mt-1 whitespace-pre-wrap text-sm text-slate-900">{anggota.alamat || '-'}</dd>
+        </div>
+        <div class="p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Terdaftar Sejak</dt>
+          <dd class="mt-1 text-sm text-slate-900">{formatTanggal(anggota.created_at)}</dd>
+        </div>
+      </dl>
+    </section>
+  </main>
+</LayoutDashboard>

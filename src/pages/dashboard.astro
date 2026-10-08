@@ -1,0 +1,49 @@
+---
+import LayoutDashboard from '../layouts/LayoutDashboard.astro';
+import { supabase } from '../lib/supabase';
+import '../styles/global.css';
+
+// Ambil session user yang sedang login
+const { data: { session } } = await supabase.auth.getSession();
+
+if (!session) {
+  return Astro.redirect('/login');
+}
+
+// Ambil profil anggota berdasarkan user_id
+const { data: profile } = await supabase
+  .from('anggota')
+  .select('*')
+  .eq('user_id', session.user.id)
+  .single();
+---
+
+<LayoutDashboard title="Dashboard Krama - Banjar Adat" role={profile?.role || 'KRAMA'}>
+  <div class="max-w-4xl mx-auto space-y-6">
+    <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 space-y-2">
+      <span class="text-xs font-bold px-3 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-full">
+        Portal Krama Banjar Adat
+      </span>
+      <h1 class="text-2xl font-black">Om Swastyastu, {profile?.nama_lengkap || 'Krama'}</h1>
+      <p class="text-xs text-slate-400">Selamat datang di portal layanan mandiri krama banjar.</p>
+    </div>
+
+    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+      <h2 class="text-base font-bold text-slate-800">Informasi Akun Anda</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+        <div class="p-4 bg-slate-50 rounded-xl border border-slate-100 space-y-1">
+          <span class="text-slate-400 font-bold uppercase text-[10px]">Nomor WhatsApp / HP</span>
+          <p class="font-semibold text-slate-800 text-sm">{profile?.no_hp || '-'}</p>
+        </div>
+        <div class="p-4 bg-slate-50 rounded-xl border border-slate-100 space-y-1">
+          <span class="text-slate-400 font-bold uppercase text-[10px]">Tempekan / Regu</span>
+          <p class="font-semibold text-slate-800 text-sm">Regu {profile?.no_regu || '-'} ({profile?.tempekan || '-'})</p>
+        </div>
+        <div class="p-4 bg-slate-50 rounded-xl border border-slate-100 space-y-1 md:col-span-2">
+          <span class="text-slate-400 font-bold uppercase text-[10px]">Alamat</span>
+          <p class="font-semibold text-slate-800 text-sm">{profile?.alamat || '-'}</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</LayoutDashboard>

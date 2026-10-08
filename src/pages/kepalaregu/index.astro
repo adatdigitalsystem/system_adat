@@ -1,0 +1,477 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
+import { labelStatusKeanggotaan } from '../../lib/utils';
+import PrintReportButton from '../../components/common/PrintReportButton.astro';
+
+let notice = '';
+let noticeIsError = false;
+const formatRupiah = (val: number) =>
+  new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val || 0);
+
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+let kepalaProfile: { id: string; no_regu: string | null; regu_id: string | null; nama_lengkap: string; role: string | null } | null = null;
+
+if (accessToken) {
+  const { data: { user } } = await supabase.auth.getUser(accessToken);
+  if (user) {
+    const { data } = await supabase
+      .from('anggota')
+      .select('id, no_regu, regu_id, nama_lengkap, role')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    kepalaProfile = data;
+  }
+}
+
+const dataClient = kepalaProfile ? createSupabaseAdminClient() : supabase;
+const kepalaRole = (kepalaProfile?.role || '').toUpperCase().replace(/[\s_-]/g, '');
+const isKepalaRegu = ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes(kepalaRole);
+const isReadOnlyReguViewer = ['ADMIN', 'BENDAHARA'].includes(kepalaRole);
+const canCollectPayments = isKepalaRegu;
+
+const [{ data: masterRegu }, { data: anggotaDenganRegu }] = await Promise.all([
+  dataClient.from('regu').select('id, nama_regu').order('nama_regu', { ascending: true }),
+  dataClient.from('anggota').select('regu_id, no_regu'),
+]);
+const namaReguById = new Map((masterRegu || []).map((regu) => [regu.id, regu.nama_regu]));
+const opsiReguByKey = new Map<string, { value: string; nama_regu: string; regu_id: string | null; no_regu: string | null }>();
+
+for (const anggota of anggotaDenganRegu || []) {
+  if (anggota.regu_id) {
+    opsiReguByKey.set(anggota.regu_id, {
+      value: anggota.regu_id,
+      nama_regu: namaReguById.get(anggota.regu_id) || `Regu ${anggota.no_regu || 'tanpa nomor'}`,
+      regu_id: anggota.regu_id,
+      no_regu: null,
+    });
+  } else if (anggota.no_regu?.trim()) {
+    const noRegu = anggota.no_regu.trim();
+    const value = `no_regu:${noRegu}`;
+    opsiReguByKey.set(value, {
+      value,
+      nama_regu: `Regu ${noRegu} (data anggota)`,
+      regu_id: null,
+      no_regu: noRegu,
+    });
+  }
+}
+
+const daftarRegu = [...opsiReguByKey.values()].sort((left, right) =>
+  left.nama_regu.localeCompare(right.nama_regu, 'id', { numeric: true, sensitivity: 'base' }),
+);
+
+const requestedReguId = Astro.url.searchParams.get('regu');
+const assignedReguValue = kepalaProfile?.regu_id
+  || (kepalaProfile?.no_regu?.trim() ? `no_regu:${kepalaProfile.no_regu.trim()}` : null);
+const selectedRegu = isKepalaRegu
+  ? daftarRegu.find((regu) => regu.value === assignedReguValue) || null
+  : isReadOnlyReguViewer
+    ? daftarRegu.find((regu) => regu.value === requestedReguId) || null
+    : null;
+const selectedReguId = selectedRegu?.regu_id || null;
+const selectedNoRegu = selectedRegu?.no_regu || null;
+const selectedReguValue = selectedRegu?.value || null;
+const reguKepala = isReadOnlyReguViewer ? selectedRegu?.nama_regu || null : selectedRegu?.nama_regu || kepalaProfile?.no_regu || null;
+const namaKepala = isReadOnlyReguViewer ? 'Pemantauan Bendahara' : kepalaProfile?.nama_lengkap || 'Kepala Regu';
+
+let anggotaRegu: any[] = [];
+if (selectedReguId || selectedNoRegu) {
+  let anggotaQuery = dataClient
+    .from('anggota')
+    .select('*')
+    .order('nama_lengkap', { ascending: true });
+  anggotaQuery = selectedReguId
+    ? anggotaQuery.eq('regu_id', selectedReguId)
+    : anggotaQuery.eq('no_regu', selectedNoRegu);
+  const { data } = await anggotaQuery;
+  anggotaRegu = data || [];
+}
+
+if (Astro.request.method === 'POST') {
+  try {
+    if (!accessToken || !kepalaProfile) throw new Error('Sesi Kepala Regu tidak valid. Silakan login kembali.');
+    if (!canCollectPayments) {
+      throw new Error('Aksi pungutan dan setoran hanya dapat dilakukan oleh Kepala Regu.');
+    }
+    const formData = await Astro.request.formData();
+    const action = formData.get('action_type')?.toString();
+
+    if (action === 'KUMPULKAN_TAGIHAN') {
+      const tagihanId = formData.get('tagihan_id')?.toString();
+      const nominalBayar = Number(formData.get('nominal_bayar'));
+      if (!tagihanId || !Number.isFinite(nominalBayar) || nominalBayar <= 0) {
+        throw new Error('Pilih tagihan dan masukkan nominal pembayaran yang valid.');
+      }
+
+      const { data: tagihan, error: tagihanError } = await dataClient
+        .from('tagihan_krama')
+        .select('id, anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar, keterangan, event_adat_id')
+        .eq('id', tagihanId)
+        .maybeSingle();
+      if (tagihanError) throw tagihanError;
+      if (!tagihan) throw new Error('Tagihan tidak ditemukan.');
+
+      const { data: anggota, error: anggotaError } = await dataClient
+        .from('anggota')
+        .select('id, regu_id')
+        .eq('id', tagihan.anggota_id)
+        .maybeSingle();
+      if (anggotaError) throw anggotaError;
+      if (!anggota || anggota.regu_id !== kepalaProfile.regu_id) {
+        throw new Error('Anda hanya dapat menerima pembayaran dari anggota regu sendiri.');
+      }
+
+      const totalNominal = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+      const jumlahDibayar = Number(tagihan.jumlah_dibayar || 0);
+      const sisaTagihan = Math.max(0, totalNominal - jumlahDibayar);
+      if (nominalBayar > sisaTagihan) {
+        throw new Error('Nominal pembayaran melebihi sisa kewajiban.');
+      }
+      if (['LUNAS', 'COLLECTED_BY_REGU'].includes((tagihan.status_bayar || '').toUpperCase()) || sisaTagihan <= 0) {
+        throw new Error('Tagihan ini sudah lunas atau menunggu penyetoran ke Bendahara.');
+      }
+
+      const { data: previousPayments, error: previousPaymentsError } = await dataClient
+        .from('riwayat_pembayaran_cicilan')
+        .select('setoran_regu_id')
+        .eq('tagihan_krama_id', tagihan.id)
+        .not('setoran_regu_id', 'is', null);
+      if (previousPaymentsError) throw previousPaymentsError;
+
+      const submittedDepositIds = [...new Set((previousPayments || [])
+        .map((payment) => payment.setoran_regu_id)
+        .filter((id): id is string => Boolean(id)))];
+      if (submittedDepositIds.length) {
+        const { data: pendingDeposit, error: pendingDepositError } = await dataClient
+          .from('setoran_regu')
+          .select('id')
+          .in('id', submittedDepositIds)
+          .eq('status_verifikasi', 'PENDING')
+          .limit(1)
+          .maybeSingle();
+        if (pendingDepositError) throw pendingDepositError;
+        if (pendingDeposit) throw new Error('Pembayaran untuk tagihan ini sedang menunggu verifikasi Bendahara.');
+      }
+
+      const { data: payment, error: paymentError } = await dataClient.from('riwayat_pembayaran_cicilan').insert({
+        tagihan_krama_id: tagihan.id,
+        anggota_id: anggota.id,
+        diterima_oleh: kepalaProfile.id,
+        nominal_bayar: nominalBayar,
+        metode_pembayaran: 'CASH_REGU',
+        keterangan: 'Pembayaran tunai diterima Kepala Regu',
+      }).select('id').single();
+      if (paymentError) throw paymentError;
+
+      const totalBaru = jumlahDibayar + nominalBayar;
+      const statusBaru = totalBaru >= totalNominal ? 'COLLECTED_BY_REGU' : 'PARTIAL';
+      const { error: updateError } = await dataClient
+        .from('tagihan_krama')
+        .update({ jumlah_dibayar: totalBaru, status_bayar: statusBaru, updated_at: new Date().toISOString() })
+        .eq('id', tagihan.id);
+      if (updateError) {
+        if (payment?.id) await dataClient.from('riwayat_pembayaran_cicilan').delete().eq('id', payment.id);
+        throw updateError;
+      }
+
+      notice = `Pembayaran ${formatRupiah(nominalBayar)} berhasil dicatat.`;
+    } else if (action === 'AJUKAN_SETORAN') {
+      if (!kepalaProfile.id) throw new Error('ID Kepala Regu tidak ditemukan.');
+
+      const { data: payments, error: paymentsError } = await dataClient
+        .from('riwayat_pembayaran_cicilan')
+        .select('id, nominal_bayar')
+        .eq('diterima_oleh', kepalaProfile.id)
+        .is('setoran_regu_id', null);
+      if (paymentsError) throw paymentsError;
+
+      const totalSetoran = (payments || []).reduce((total, payment) => total + Number(payment.nominal_bayar || 0), 0);
+      if (!payments?.length || totalSetoran <= 0) throw new Error('Belum ada uang terkumpul yang dapat diajukan.');
+
+      const { data: setoran, error: depositError } = await dataClient
+        .from('setoran_regu')
+        .insert({
+          regu_id: kepalaProfile.regu_id,
+          kepala_regu_id: kepalaProfile.id,
+          total_nominal: totalSetoran,
+          status_verifikasi: 'PENDING',
+          keterangan: `Penyetoran ${payments.length} transaksi pembayaran anggota Regu ${kepalaProfile.no_regu || '-'}`,
+        })
+        .select('id')
+        .single();
+      if (depositError) throw depositError;
+
+      const { error: linkError } = await dataClient
+        .from('riwayat_pembayaran_cicilan')
+        .update({ setoran_regu_id: setoran.id })
+        .in('id', payments.map((payment) => payment.id));
+      if (linkError) {
+        await dataClient.from('setoran_regu').delete().eq('id', setoran.id);
+        throw linkError;
+      }
+
+      notice = `Pengajuan setoran ${formatRupiah(totalSetoran)} (${payments.length} transaksi) berhasil dikirim ke Bendahara.`;
+    } else {
+      throw new Error('Aksi tidak dikenali.');
+    }
+  } catch (err: any) {
+    notice = err?.message || 'Gagal memproses pembayaran atau setoran.';
+    noticeIsError = true;
+  }
+}
+
+// Ambil daftar event adat dan tagihan kewajiban anggota pada regu terpilih
+const { data: listEvent } = await dataClient
+  .from('event_adat')
+  .select('*')
+  .order('tanggal_event', { ascending: false });
+
+const anggotaIds = anggotaRegu?.map(a => a.id) || [];
+  let tagihanQuery = dataClient
+  .from('tagihan_krama')
+  .select('*, event_adat(nama_event), anggota(nama_lengkap)')
+    .in('status_bayar', ['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL', 'COLLECTED_BY_REGU']);
+  if (anggotaIds.length) tagihanQuery = tagihanQuery.in('anggota_id', anggotaIds);
+  const { data: listTagihan } = anggotaIds.length ? await tagihanQuery : { data: [] };
+
+const kepalaReguIds = isReadOnlyReguViewer
+  ? anggotaRegu.filter((anggota) => ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes((anggota.role || '').toUpperCase().replace(/[\s_-]/g, ''))).map((anggota) => anggota.id)
+  : kepalaProfile?.id ? [kepalaProfile.id] : [];
+const { data: paymentsBelumDisetor } = await dataClient
+  .from('riwayat_pembayaran_cicilan')
+  .select('nominal_bayar')
+  .in('diterima_oleh', kepalaReguIds.length ? kepalaReguIds : ['00000000-0000-0000-0000-000000000000'])
+  .is('setoran_regu_id', null);
+const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) => total + Number(payment.nominal_bayar || 0), 0);
+
+---
+
+<LayoutDashboard title="Portal Kepala Regu - Banjar Adat" role={kepalaProfile?.role || 'KEPALA_REGU'}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+
+    {notice && (
+      <div class={`rounded-xl border p-4 text-sm font-semibold ${noticeIsError ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`} role="status">
+        {notice}
+      </div>
+    )}
+    
+    <!-- Header Portal Kepala Regu -->
+    <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
+      <div>
+        <span class="text-xs font-bold px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full">
+          {isReadOnlyReguViewer ? 'Mode Pemantauan Regu' : 'Portal Kepala Regu'} {reguKepala ? `- ${reguKepala}` : ''}
+        </span>
+        <h1 class="text-xl md:text-2xl font-black mt-2">{isReadOnlyReguViewer ? 'Pemantauan Anggota & Kewajiban Regu' : 'Pengelolaan Anggota & Kewajiban Regu'}</h1>
+      </div>
+      <div class="text-xs text-slate-400">
+        <span>{isReadOnlyReguViewer ? 'Diakses oleh' : 'Kepala Regu'}: <strong class="text-white">{namaKepala}</strong></span>
+      </div>
+    </div>
+
+    {isReadOnlyReguViewer && (
+      <form action="/kepalaregu" method="GET" class="no-print flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-end">
+        <label class="flex-1 space-y-1">
+          <span class="block text-[11px] font-bold uppercase text-slate-600">Pilih Regu untuk Dipantau</span>
+          <select name="regu" required class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-800">
+            <option value="">Pilih regu</option>
+            {daftarRegu.map((regu) => <option value={regu.value} selected={regu.value === selectedReguValue}>{regu.nama_regu}</option>)}
+          </select>
+        </label>
+        <button type="submit" class="rounded-lg bg-amber-500 px-4 py-2 text-sm font-bold text-slate-950 hover:bg-amber-600">Tampilkan Regu</button>
+      </form>
+    )}
+
+    {isReadOnlyReguViewer && !selectedRegu && (
+      <div class="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
+        Pilih regu di atas untuk melihat anggota, kewajiban event, dan kas yang belum disetorkan. Mode ini hanya untuk pemantauan.
+      </div>
+    )}
+
+    <!-- Grid Utama: Daftar Anggota Regu & Kewajiban Event -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      
+      <!-- Kolom 1 & 2: Daftar Anggota Regu (Tanpa No Telp, Nama sebagai Hyperlink) -->
+      <div id="kepalaregu-anggota-report" class="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="text-base font-bold text-slate-800">Daftar Anggota Krama di Regu Anda (Regu {reguKepala || '-'})</h2>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-500">Total: {anggotaRegu?.length || 0} Orang</span>
+            <PrintReportButton targetId="kepalaregu-anggota-report" title={`Daftar Anggota Regu ${reguKepala || ''}`} />
+          </div>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs text-left text-slate-600">
+            <thead class="bg-slate-50 text-slate-500 uppercase border-b border-slate-200">
+              <tr>
+                <th class="p-3">Nama Anggota (Detail)</th>
+                <th class="p-3">Tempekan</th>
+                <th class="p-3">Status</th>
+                <th class="p-3 text-center">Aksi</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              {anggotaRegu && anggotaRegu.length > 0 ? (
+                anggotaRegu.map((item) => (
+                  <tr class="hover:bg-slate-50">
+                    <td class="p-3 font-semibold text-slate-900">
+                      <!-- Nama sebagai Hyperlink ke Detail Anggota -->
+                      <a href={`/krama/detail?id=${item.id}`} class="text-blue-600 hover:underline flex items-center gap-2">
+                        <span>👤</span> {item.nama_lengkap}
+                      </a>
+                    </td>
+                    <td class="p-3">{item.tempekan || '-'}</td>
+                    <td class="p-3">
+                      <span class={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        item.status_aktif === 'TIDAK_AKTIF' ? 'bg-red-100 text-red-800' : 'bg-emerald-100 text-emerald-800'
+                      }`}>
+                        {labelStatusKeanggotaan(item.status_aktif)}
+                      </span>
+                    </td>
+                    <td class="p-3 text-center">
+                      <a href={`/krama/detail?id=${item.id}`} class="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg transition">
+                        Lihat Profil
+                      </a>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colspan="4" class="p-6 text-center text-slate-400 italic">Tidak ada anggota terdaftar dalam regu ini.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Kolom 3: Ringkasan Status Regu -->
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <h2 class="text-base font-bold text-slate-800">Ringkasan Regu</h2>
+        <div class="space-y-3">
+          <div class="p-4 bg-slate-50 rounded-xl border border-slate-100">
+            <p class="text-xs text-slate-500">Total Krama Regu</p>
+            <p class="text-xl font-black text-slate-900 mt-1">{anggotaRegu?.length || 0} Anggota</p>
+          </div>
+          <div class="p-4 bg-slate-50 rounded-xl border border-slate-100">
+            <p class="text-xs text-slate-500">Total Tagihan Belum Lunas (Regu)</p>
+            <p class="text-xl font-black text-amber-600 mt-1">{listTagihan?.length || 0} Tagihan</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Bagian Bawah: Daftar Kewajiban Anggota Dikelompokkan Berdasarkan Event -->
+    <div id="kepalaregu-kewajiban-report" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-6">
+      <div>
+        <h2 class="text-base font-bold text-slate-800">Daftar Kewajiban Anggota (Belum Disetor ke Bendahara)</h2>
+        <p class="text-xs text-slate-500 mt-0.5">Catat uang yang diterima dari anggota. Tagihan lunas akan menunggu pengajuan setoran ke Bendahara.</p>
+        <div class="mt-3">
+          <PrintReportButton targetId="kepalaregu-kewajiban-report" title={`Laporan Kewajiban Regu ${reguKepala || ''}`} />
+        </div>
+      </div>
+
+      {listEvent && listEvent.length > 0 ? (
+        <div class="space-y-6">
+          {listEvent.map((evt) => {
+            // Saring tagihan yang sesuai dengan event ini dan anggota regu
+            const tagihanEvent = listTagihan?.filter(t => t.event_adat_id === evt.id) || [];
+            
+            if (tagihanEvent.length === 0) return null; // Sembunyikan event jika tidak ada kewajiban
+
+            return (
+              <div class="border border-slate-200 rounded-2xl p-4 space-y-3 bg-slate-50/50">
+                <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-slate-200 pb-3">
+                  <div>
+                    <span class="text-[10px] font-bold px-2.5 py-0.5 bg-amber-100 text-amber-800 rounded-full">{evt.jenis_event}</span>
+                    <h3 class="text-sm font-black text-slate-900 mt-1">{evt.nama_event}</h3>
+                  </div>
+                  <span class="text-xs text-slate-500 font-medium">Tanggal: {evt.tanggal_event || '-'}</span>
+                </div>
+
+                <div class="overflow-x-auto">
+                  <table class="w-full text-xs text-left text-slate-600">
+                    <thead class="text-slate-400 uppercase border-b border-slate-200">
+                      <tr>
+                        <th class="py-2">Nama Krama</th>
+                        <th class="py-2">Keterangan</th>
+                        <th class="py-2 text-right">Nominal Kewajiban</th>
+                        <th class="py-2 text-right">Sudah Dikumpulkan</th>
+                        <th class="py-2 text-right">Sisa</th>
+                        <th class="py-2 text-center">Aksi</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                      {tagihanEvent.map((tagih) => (
+                        <tr>
+                          <td class="py-2.5 font-semibold text-slate-900">
+                            <a href={`/krama/detail?id=${tagih.anggota_id}`} class="text-blue-600 hover:underline">
+                              {tagih.anggota?.nama_lengkap || 'Krama'}
+                            </a>
+                          </td>
+                          <td class="py-2.5">{tagih.keterangan || 'Iuran Event'}</td>
+                          <td class="py-2.5 text-right font-bold text-slate-900">{formatRupiah(Number(tagih.total_nominal ?? tagih.nominal ?? 0))}</td>
+                          <td class="py-2.5 text-right">{formatRupiah(Number(tagih.jumlah_dibayar || 0))}</td>
+                          <td class="py-2.5 text-right font-semibold">{formatRupiah(Math.max(0, Number(tagih.total_nominal ?? tagih.nominal ?? 0) - Number(tagih.jumlah_dibayar || 0)))}</td>
+                          <td class="py-2.5 text-center">
+                            {!canCollectPayments ? (
+                              <span class="inline-block rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-600">Mode lihat</span>
+                            ) : tagih.status_bayar === 'COLLECTED_BY_REGU' ? (
+                              <span class="inline-block rounded-full bg-blue-100 px-2 py-1 text-[10px] font-bold text-blue-800">Terkumpul</span>
+                            ) : (
+                              <form method="POST" class="flex min-w-36 items-center justify-center gap-1">
+                                <input type="hidden" name="action_type" value="KUMPULKAN_TAGIHAN" />
+                                <input type="hidden" name="tagihan_id" value={tagih.id} />
+                                <input
+                                  type="number"
+                                  name="nominal_bayar"
+                                  min="1"
+                                  max={Math.max(0, Number(tagih.total_nominal ?? tagih.nominal ?? 0) - Number(tagih.jumlah_dibayar || 0))}
+                                  step="1"
+                                  required
+                                  value={Math.max(0, Number(tagih.total_nominal ?? tagih.nominal ?? 0) - Number(tagih.jumlah_dibayar || 0))}
+                                  aria-label={`Nominal pembayaran ${tagih.anggota?.nama_lengkap || 'anggota'}`}
+                                  class="w-24 rounded border border-slate-300 px-2 py-1 text-right text-[11px]"
+                                />
+                                <button type="submit" class="whitespace-nowrap rounded bg-emerald-600 px-2 py-1 font-bold text-white hover:bg-emerald-700">Terima</button>
+                              </form>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div class="text-center py-8 text-slate-400 italic text-xs">
+          Belum ada event atau kewajiban aktif saat ini.
+        </div>
+      )}
+    </div>
+
+    <section id="kepalaregu-setoran-report" class="flex flex-col gap-4 rounded-xl border border-slate-800 bg-slate-900 p-5 text-white sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h2 class="text-sm font-bold text-amber-300">Setorkan Kas Terkumpul ke Bendahara</h2>
+        <p class="mt-1 text-xs text-slate-300">Pembayaran yang belum pernah diajukan akan dimasukkan ke satu pengajuan setoran.</p>
+        <p class="mt-2 text-xl font-black text-amber-300">{formatRupiah(totalBelumDisetor)}</p>
+      </div>
+      <div class="no-print flex flex-wrap items-center gap-2">
+      <PrintReportButton targetId="kepalaregu-setoran-report" title={`Rekap Kas Terkumpul Regu ${reguKepala || ''}`} />
+      {canCollectPayments && <form method="POST">
+        <input type="hidden" name="action_type" value="AJUKAN_SETORAN" />
+        <button type="submit" disabled={totalBelumDisetor <= 0} class="rounded-lg bg-amber-500 px-4 py-2.5 text-xs font-bold text-slate-950 hover:bg-amber-600 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400">
+          Ajukan Setoran ke Bendahara
+        </button>
+      </form>}
+      </div>
+    </section>
+
+  </div>
+</LayoutDashboard>

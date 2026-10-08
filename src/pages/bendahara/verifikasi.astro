@@ -1,0 +1,2229 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
+import { labelStatusKeanggotaan } from '../../lib/utils';
+import PrintReportButton from '../../components/common/PrintReportButton.astro';
+
+let errorMessage = '';
+let successMessage = '';
+const formatRupiah = (val: number) =>
+  new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val || 0);
+const isValidDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00`));
+
+if (Astro.request.method === 'POST') {
+  try {
+    const accessToken = Astro.cookies.get('sb-access-token')?.value;
+    if (!accessToken) throw new Error('Sesi login tidak ditemukan. Silakan login kembali.');
+
+    const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
+    if (userError || !user) throw new Error('Sesi login tidak valid. Silakan login kembali.');
+
+    const { data: actor, error: actorError } = await supabase
+      .from('anggota')
+      .select('id, role')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    if (actorError) throw actorError;
+    if (!actor) throw new Error('Profil petugas tidak ditemukan.');
+
+    const actorRole = (actor?.role || '').toUpperCase().replace(/[\s_-]/g, '');
+    if (!['ADMIN', 'BENDAHARA'].includes(actorRole)) {
+      throw new Error('Aksi ini hanya dapat dilakukan oleh Admin atau Bendahara.');
+    }
+
+    const privilegedSupabase = createSupabaseAdminClient();
+    const formData = await Astro.request.formData();
+    const action = formData.get('action');
+
+    if (action === 'posting_saldo_awal') {
+      const anggotaId = formData.get('anggota_id')?.toString();
+      const nominal = Number(formData.get('nominal'));
+      const tanggal = formData.get('tanggal')?.toString();
+      const keterangan = formData.get('keterangan')?.toString().trim() || 'Saldo awal kewajiban';
+      if (!anggotaId || !tanggal || !isValidDate(tanggal) || !Number.isFinite(nominal) || nominal <= 0) {
+        throw new Error('Pilih krama, tanggal saldo awal, dan nominal yang valid.');
+      }
+
+      const { data: existingBills, error: existingBillsError } = await privilegedSupabase
+        .from('tagihan_krama')
+        .select('id, keterangan')
+        .eq('anggota_id', anggotaId);
+      if (existingBillsError) throw existingBillsError;
+      if ((existingBills || []).some((bill) => (bill.keterangan || '').startsWith('[SALDO AWAL]'))) {
+        throw new Error('Saldo awal untuk krama ini sudah pernah diposting. Gunakan catatan koreksi jika perlu penyesuaian.');
+      }
+
+      const { data: member, error: memberError } = await privilegedSupabase
+        .from('anggota')
+        .select('nama_lengkap')
+        .eq('id', anggotaId)
+        .maybeSingle();
+      if (memberError) throw memberError;
+      if (!member) throw new Error('Data krama tidak ditemukan.');
+
+      const { error } = await privilegedSupabase.from('tagihan_krama').insert({
+        anggota_id: anggotaId,
+        total_nominal: nominal,
+        nominal,
+        jumlah_dibayar: 0,
+        status_bayar: 'BELUM_LUNAS',
+        tanggal_kejadian: tanggal,
+        keterangan: `[SALDO AWAL] ${keterangan}`,
+      });
+      if (error) throw error;
+      successMessage = `Saldo awal ${formatRupiah(nominal)} untuk ${member.nama_lengkap} berhasil diposting sebagai debet kewajiban.`;
+    }
+    else if (action === 'catat_pengeluaran_kas') {
+      const tanggal = formData.get('tanggal')?.toString();
+      const kategori = formData.get('kategori')?.toString() || '';
+      const penerima = formData.get('penerima')?.toString().trim() || '';
+      const keterangan = formData.get('keterangan')?.toString().trim() || '';
+      const nominal = Number(formData.get('nominal'));
+      const metode = formData.get('metode_pembayaran')?.toString() || 'TUNAI';
+      const buktiUrl = formData.get('bukti_url')?.toString().trim() || null;
+      const kategoriValid = ['BANTUAN_DUKA', 'BANTUAN_PERNIKAHAN', 'OPERASIONAL', 'LAINNYA'].includes(kategori);
+      if (!tanggal || !isValidDate(tanggal) || !kategoriValid || !penerima || !keterangan || !Number.isFinite(nominal) || nominal <= 0) {
+        throw new Error('Lengkapi tanggal, kategori, penerima, keterangan, dan nominal pengeluaran yang valid.');
+      }
+      if (buktiUrl) {
+        let parsedBukti: URL;
+        try {
+          parsedBukti = new URL(buktiUrl);
+        } catch {
+          throw new Error('Link bukti harus berupa URL yang valid.');
+        }
+        if (!['http:', 'https:'].includes(parsedBukti.protocol)) throw new Error('Link bukti harus menggunakan HTTP atau HTTPS.');
+      }
+
+      const { error } = await privilegedSupabase.from('transaksi_kas').insert({
+        tanggal,
+        arah: 'KELUAR',
+        kategori,
+        penerima,
+        keterangan,
+        nominal,
+        metode_pembayaran: metode,
+        bukti_url: buktiUrl,
+        created_by: actor.id,
+      });
+      if (error) throw error;
+      successMessage = `Pengeluaran ${formatRupiah(nominal)} untuk ${penerima} berhasil dicatat.`;
+    }
+    else if (action === 'catat_pemasukan_kas' || action === 'posting_saldo_awal_kas') {
+      const isOpeningBalance = action === 'posting_saldo_awal_kas';
+      const tanggal = formData.get('tanggal')?.toString() || '';
+      const penerima = formData.get('sumber')?.toString().trim() || '';
+      const keterangan = formData.get('keterangan')?.toString().trim() || '';
+      const nominal = Number(formData.get('nominal'));
+      const metode = formData.get('metode_pembayaran')?.toString() || 'TUNAI';
+      const buktiUrl = formData.get('bukti_url')?.toString().trim() || null;
+      const requestedCategory = formData.get('kategori')?.toString() || 'PEMASUKAN_LAIN';
+      const kategori = isOpeningBalance ? 'SALDO_AWAL_KAS' : requestedCategory;
+      const incomeCategories = ['PEMASUKAN_LAIN', 'SUMBANGAN', 'PENGEMBALIAN_DANA'];
+
+      if (!tanggal || !isValidDate(tanggal) || !penerima || !keterangan || !Number.isFinite(nominal) || nominal < 0 || (!isOpeningBalance && nominal === 0)) {
+        throw new Error('Lengkapi tanggal, sumber dana, keterangan, dan nominal kas masuk yang valid.');
+      }
+      if (isOpeningBalance) {
+        const { data: existingOpening, error: openingError } = await privilegedSupabase
+          .from('transaksi_kas')
+          .select('id')
+          .eq('arah', 'SALDO_AWAL')
+          .eq('kategori', 'SALDO_AWAL_KAS')
+          .limit(1)
+          .maybeSingle();
+        if (openingError) throw openingError;
+        if (existingOpening) throw new Error('Saldo awal kas sudah pernah diposting. Gunakan catatan koreksi untuk penyesuaian.');
+      } else if (!incomeCategories.includes(kategori)) {
+        throw new Error('Pilih kategori pemasukan kas yang valid.');
+      }
+      if (buktiUrl) {
+        let parsedBukti: URL;
+        try {
+          parsedBukti = new URL(buktiUrl);
+        } catch {
+          throw new Error('Link bukti harus berupa URL yang valid.');
+        }
+        if (!['http:', 'https:'].includes(parsedBukti.protocol)) throw new Error('Link bukti harus menggunakan HTTP atau HTTPS.');
+      }
+
+      const { error } = await privilegedSupabase.from('transaksi_kas').insert({
+        tanggal,
+        arah: isOpeningBalance ? 'SALDO_AWAL' : 'MASUK',
+        kategori,
+        penerima,
+        keterangan,
+        nominal,
+        metode_pembayaran: metode,
+        bukti_url: buktiUrl,
+        created_by: actor.id,
+      });
+      if (error) throw error;
+      successMessage = isOpeningBalance
+        ? `Saldo awal kas ${formatRupiah(nominal)} per ${tanggal} berhasil diposting.`
+        : `Pemasukan kas ${formatRupiah(nominal)} dari ${penerima} berhasil dicatat.`;
+    }
+    else if (action === 'verifikasi_setoran') {
+      const setoranId = formData.get('setoran_id')?.toString();
+      const status = formData.get('status')?.toString();
+      if (!setoranId || !['VERIFIED', 'REJECTED'].includes(status || '')) {
+        throw new Error('Setoran atau status verifikasi tidak valid.');
+      }
+
+      const { error } = await privilegedSupabase
+        .from('setoran_regu')
+        .update({
+          status_verifikasi: status,
+          tanggal_verifikasi: new Date().toISOString(),
+        })
+        .eq('id', setoranId);
+
+      if (error) throw error;
+
+      const { data: setoranPayments, error: setoranPaymentsError } = await privilegedSupabase
+        .from('riwayat_pembayaran_cicilan')
+        .select('tagihan_krama_id')
+        .eq('setoran_regu_id', setoranId);
+      if (setoranPaymentsError) throw setoranPaymentsError;
+
+      const affectedTagihanIds = [...new Set((setoranPayments || [])
+        .map((payment) => payment.tagihan_krama_id)
+        .filter((id): id is string => Boolean(id)))];
+
+      if (status === 'REJECTED') {
+        const { error: releasePaymentsError } = await privilegedSupabase
+          .from('riwayat_pembayaran_cicilan')
+          .update({ setoran_regu_id: null })
+          .eq('setoran_regu_id', setoranId);
+        if (releasePaymentsError) throw releasePaymentsError;
+      }
+
+      for (const tagihanId of affectedTagihanIds) {
+        const { data: tagihan, error: tagihanError } = await privilegedSupabase
+          .from('tagihan_krama')
+          .select('total_nominal, nominal, jumlah_dibayar')
+          .eq('id', tagihanId)
+          .maybeSingle();
+        if (tagihanError) throw tagihanError;
+        if (!tagihan) continue;
+
+        const total = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+        const collected = Number(tagihan.jumlah_dibayar || 0);
+        let nextStatus: string | null = null;
+        if (status === 'VERIFIED' && collected >= total) nextStatus = 'LUNAS';
+        if (status === 'REJECTED') {
+          nextStatus = collected >= total ? 'COLLECTED_BY_REGU' : collected > 0 ? 'PARTIAL' : 'BELUM_LUNAS';
+        }
+        if (nextStatus) {
+          const { error: statusError } = await privilegedSupabase
+            .from('tagihan_krama')
+            .update({ status_bayar: nextStatus, updated_at: new Date().toISOString() })
+            .eq('id', tagihanId);
+          if (statusError) throw statusError;
+        }
+      }
+
+      successMessage = `Setoran berhasil diverifikasi menjadi ${status}!`;
+    }
+    else if (action === 'simpan_denda_cicilan') {
+      const anggota_id = formData.get('anggota_id');
+      const total_nominal = formData.get('nominal');
+      const jenis = formData.get('jenis');
+      const keterangan = formData.get('keterangan');
+      const tanggal_kejadian = formData.get('tanggal_kejadian') || new Date().toISOString().split('T')[0];
+
+      const keteranganLengkap = `[${jenis}] ${keterangan}`;
+      const duplicateSince = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const { data: existingDuplicate, error: duplicateError } = await privilegedSupabase
+        .from('tagihan_krama')
+        .select('id')
+        .eq('anggota_id', anggota_id)
+        .eq('total_nominal', total_nominal)
+        .eq('keterangan', keteranganLengkap)
+        .eq('tanggal_kejadian', tanggal_kejadian)
+        .gte('created_at', duplicateSince)
+        .limit(1);
+      if (duplicateError) throw duplicateError;
+      if (existingDuplicate && existingDuplicate.length > 0) {
+        throw new Error('Denda yang sama untuk anggota ini baru saja dicatat. Pengiriman ganda diabaikan.');
+      }
+
+      const { error } = await privilegedSupabase.from('tagihan_krama').insert([
+        { 
+          anggota_id, 
+          total_nominal, 
+          status_bayar: 'BELUM_LUNAS', 
+          keterangan: keteranganLengkap,
+          tanggal_kejadian 
+        }
+      ]);
+      if (error) throw error;
+      successMessage = 'Data denda / cicilan Numbas Ayahan berhasil dicatat!';
+    }
+    else if (action === 'bayar_numbas_ayahan') {
+      const tagihanId = formData.get('tagihan_id')?.toString();
+      const nominalBayar = Number(formData.get('nominal_bayar'));
+      const tanggalBayar = formData.get('tanggal_bayar')?.toString() || new Date().toISOString().slice(0, 10);
+      const keteranganBayar = formData.get('keterangan')?.toString().trim() || 'Pembayaran Numbas Ayahan';
+
+      if (!tagihanId || !Number.isFinite(nominalBayar) || nominalBayar <= 0) {
+        throw new Error('Pilih tagihan tahunan dan masukkan nominal pembayaran yang valid.');
+      }
+
+      const { data: tagihan, error: tagihanError } = await privilegedSupabase
+        .from('tagihan_krama')
+        .select('id, anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, status_aktif)')
+        .eq('id', tagihanId)
+        .maybeSingle();
+      if (tagihanError) throw tagihanError;
+      if (!tagihan) throw new Error('Tagihan tidak ditemukan.');
+      const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
+      const anggotaPasif = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+      if (eventTahunan?.jenis_event !== 'TAHUNAN' || anggotaPasif?.status_aktif !== 'TIDAK_AKTIF') {
+        throw new Error('Pembayaran Numbas Ayahan hanya untuk tagihan tahunan anggota Numbas Ayahan.');
+      }
+      if (['LUNAS', 'VERIFIED'].includes((tagihan.status_bayar || '').toUpperCase())) {
+        throw new Error('Tagihan tahunan ini sudah lunas.');
+      }
+
+      const totalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+      const totalDibayar = Number(tagihan.jumlah_dibayar || 0);
+      const sisa = Math.max(0, totalTagihan - totalDibayar);
+      if (nominalBayar > sisa) throw new Error('Nominal pembayaran melebihi sisa iuran tahunan.');
+
+      const { data: receipt, error: receiptError } = await privilegedSupabase
+        .from('riwayat_pembayaran_cicilan')
+        .insert({
+          tagihan_krama_id: tagihan.id,
+          anggota_id: tagihan.anggota_id,
+          diterima_oleh: actor.id,
+          nominal_bayar: nominalBayar,
+          tanggal_bayar: new Date(`${tanggalBayar}T12:00:00`).toISOString(),
+          metode_pembayaran: 'CASH_BENDAHARA',
+          keterangan: keteranganBayar,
+        })
+        .select('id')
+        .single();
+      if (receiptError) throw receiptError;
+
+      const totalBaru = totalDibayar + nominalBayar;
+      const statusBaru = totalBaru >= totalTagihan ? 'LUNAS' : 'PARTIAL';
+      const { error: updateTagihanError } = await privilegedSupabase
+        .from('tagihan_krama')
+        .update({ jumlah_dibayar: totalBaru, status_bayar: statusBaru, updated_at: new Date().toISOString() })
+        .eq('id', tagihan.id);
+      if (updateTagihanError) {
+        await privilegedSupabase.from('riwayat_pembayaran_cicilan').delete().eq('id', receipt.id);
+        throw updateTagihanError;
+      }
+
+      successMessage = `Pembayaran Numbas Ayahan ${formatRupiah(nominalBayar)} untuk ${anggotaPasif?.nama_lengkap || 'anggota'} berhasil dicatat.`;
+    }
+    else if (action === 'edit_tagihan') {
+      const tagihanId = formData.get('tagihan_id')?.toString();
+      const tanggal = formData.get('tanggal')?.toString() || '';
+      const nominal = Number(formData.get('nominal'));
+      const keterangan = formData.get('keterangan')?.toString().trim() || '';
+      if (!tagihanId || !isValidDate(tanggal) || !Number.isFinite(nominal) || nominal <= 0 || !keterangan) {
+        throw new Error('Lengkapi tanggal, nominal, dan keterangan tagihan dengan nilai yang valid.');
+      }
+
+      const { data: bill, error: billError } = await privilegedSupabase
+        .from('tagihan_krama')
+        .select('id, total_nominal, nominal, jumlah_dibayar, status_bayar')
+        .eq('id', tagihanId)
+        .maybeSingle();
+      if (billError) throw billError;
+      if (!bill) throw new Error('Tagihan tidak ditemukan atau sudah dihapus.');
+
+      const { data: billPayments, error: billPaymentsError } = await privilegedSupabase
+        .from('riwayat_pembayaran_cicilan')
+        .select('id, nominal_bayar, setoran_regu_id')
+        .eq('tagihan_krama_id', tagihanId);
+      if (billPaymentsError) throw billPaymentsError;
+      if ((billPayments || []).some((payment) => payment.setoran_regu_id)) {
+        throw new Error('Tagihan memiliki pembayaran yang tertaut ke setoran. Tolak setoran PENDING atau balikkan setoran VERIFIED sebelum mengedit.');
+      }
+
+      const paidRecorded = Number(bill.jumlah_dibayar || 0);
+      if (nominal < paidRecorded) throw new Error(`Nominal tagihan tidak boleh lebih kecil dari jumlah yang telah dibayar (${formatRupiah(paidRecorded)}).`);
+      const statusAfter = paidRecorded >= nominal ? 'LUNAS' : paidRecorded > 0 ? 'PARTIAL' : 'BELUM_LUNAS';
+      const { error: updateBillError } = await privilegedSupabase
+        .from('tagihan_krama')
+        .update({
+          total_nominal: nominal,
+          nominal,
+          tanggal_kejadian: tanggal,
+          keterangan,
+          status_bayar: statusAfter,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', tagihanId);
+      if (updateBillError) throw updateBillError;
+      successMessage = 'Tagihan berhasil diperbarui; saldo buku besar dihitung ulang dari data terbaru.';
+    }
+    else if (action === 'edit_pembayaran') {
+      const paymentId = formData.get('payment_id')?.toString();
+      const tanggal = formData.get('tanggal')?.toString() || '';
+      const nominal = Number(formData.get('nominal'));
+      const keterangan = formData.get('keterangan')?.toString().trim() || '';
+      if (!paymentId || !isValidDate(tanggal) || !Number.isFinite(nominal) || nominal <= 0 || !keterangan) {
+        throw new Error('Lengkapi tanggal, nominal, dan keterangan pembayaran dengan nilai yang valid.');
+      }
+
+      const { data: payment, error: paymentError } = await privilegedSupabase
+        .from('riwayat_pembayaran_cicilan')
+        .select('id, tagihan_krama_id, nominal_bayar, setoran_regu_id')
+        .eq('id', paymentId)
+        .maybeSingle();
+      if (paymentError) throw paymentError;
+      if (!payment) throw new Error('Transaksi pembayaran tidak ditemukan.');
+      if (payment.setoran_regu_id) {
+        throw new Error('Pembayaran masih tertaut ke setoran. Tolak setoran PENDING atau balikkan setoran VERIFIED sebelum mengedit.');
+      }
+
+      let bill: { id: string; total_nominal: number; nominal: number | null; jumlah_dibayar: number | null } | null = null;
+      let previousPaymentRows: Array<{ id: string; nominal_bayar: number }> = [];
+      let updatedBillValues: { jumlah_dibayar: number; status_bayar: string } | null = null;
+      if (payment.tagihan_krama_id) {
+        const { data: billData, error: billError } = await privilegedSupabase
+          .from('tagihan_krama')
+          .select('id, total_nominal, nominal, jumlah_dibayar, status_bayar')
+          .eq('id', payment.tagihan_krama_id)
+          .maybeSingle();
+        if (billError) throw billError;
+        bill = billData;
+
+        if (bill) {
+          const { data: allPayments, error: allPaymentsError } = await privilegedSupabase
+            .from('riwayat_pembayaran_cicilan')
+            .select('id, nominal_bayar, setoran_regu_id')
+            .eq('tagihan_krama_id', bill.id);
+          if (allPaymentsError) throw allPaymentsError;
+          if ((allPayments || []).some((item) => item.setoran_regu_id)) {
+            throw new Error('Tagihan memiliki pembayaran lain yang tertaut ke setoran. Setoran harus diselesaikan atau dibalik terlebih dahulu.');
+          }
+
+          previousPaymentRows = (allPayments || []).map((item) => ({ id: item.id, nominal_bayar: Number(item.nominal_bayar || 0) }));
+          const detailedPaidBefore = previousPaymentRows.reduce((total, item) => total + item.nominal_bayar, 0);
+          const legacyCredit = Math.max(0, Number(bill.jumlah_dibayar || 0) - detailedPaidBefore);
+          const paidAfter = legacyCredit + detailedPaidBefore - Number(payment.nominal_bayar || 0) + nominal;
+          const billTotal = Number(bill.total_nominal ?? bill.nominal ?? 0);
+          if (paidAfter > billTotal) throw new Error(`Pembayaran baru membuat total dibayar melebihi nilai tagihan (${formatRupiah(billTotal)}).`);
+
+          updatedBillValues = {
+            jumlah_dibayar: paidAfter,
+            status_bayar: paidAfter >= billTotal ? 'LUNAS' : paidAfter > 0 ? 'PARTIAL' : 'BELUM_LUNAS',
+          };
+          const { error: updateBillError } = await privilegedSupabase
+            .from('tagihan_krama')
+            .update({ ...updatedBillValues, updated_at: new Date().toISOString() })
+            .eq('id', bill.id);
+          if (updateBillError) throw updateBillError;
+        }
+      }
+
+      const { error: updatePaymentError } = await privilegedSupabase
+        .from('riwayat_pembayaran_cicilan')
+        .update({
+          nominal_bayar: nominal,
+          tanggal_bayar: new Date(`${tanggal}T12:00:00`).toISOString(),
+          keterangan,
+        })
+        .eq('id', paymentId);
+      if (updatePaymentError) {
+        if (bill && updatedBillValues) {
+          const oldPaid = Number(bill.jumlah_dibayar || 0);
+          const oldTotal = Number(bill.total_nominal ?? bill.nominal ?? 0);
+          await privilegedSupabase.from('tagihan_krama').update({
+            jumlah_dibayar: oldPaid,
+            status_bayar: oldPaid >= oldTotal ? 'LUNAS' : oldPaid > 0 ? 'PARTIAL' : 'BELUM_LUNAS',
+            updated_at: new Date().toISOString(),
+          }).eq('id', bill.id);
+        }
+        throw updatePaymentError;
+      }
+      successMessage = 'Pembayaran berhasil diperbarui dan saldo kewajiban direkonsiliasi.';
+    }
+    else if (action === 'buat_event') {
+      const nama_event = formData.get('nama_event');
+      const jenis_event = formData.get('jenis_event')?.toString() || '';
+      const tarif_default = formData.get('tarif_default');
+      const tanggal_event = formData.get('tanggal_event');
+      const requestedTarget = formData.get('target_status_keanggotaan')?.toString() || 'SEMUA';
+      const target_status_keanggotaan = jenis_event === 'TAHUNAN'
+        ? 'TIDAK_AKTIF'
+        : ['AKTIF', 'SEMUA'].includes(requestedTarget) ? requestedTarget : 'SEMUA';
+
+      const { data: event, error: eventError } = await privilegedSupabase.from('event_adat').insert([
+        { nama_event, jenis_event, tarif_default, tanggal_event, target_status_keanggotaan }
+      ]).select('id').single();
+      if (eventError) throw eventError;
+
+      const { data: anggotaList, error: anggotaError } = await privilegedSupabase
+        .from('anggota')
+        .select('id, status_aktif');
+      if (anggotaError) {
+        await privilegedSupabase.from('event_adat').delete().eq('id', event.id);
+        throw anggotaError;
+      }
+
+      const anggotaTertagih = (anggotaList || []).filter((anggota) => {
+        const statusAktif = anggota.status_aktif || 'AKTIF';
+        if (target_status_keanggotaan === 'TIDAK_AKTIF') return statusAktif === 'TIDAK_AKTIF';
+        if (target_status_keanggotaan === 'AKTIF') return statusAktif === 'AKTIF';
+        return statusAktif === 'AKTIF' || statusAktif === 'TIDAK_AKTIF';
+      });
+
+      if (!anggotaTertagih.length) {
+        await privilegedSupabase.from('event_adat').delete().eq('id', event.id);
+        throw new Error('Tidak ada anggota dengan status yang dipilih untuk menerima tagihan. Event tidak disimpan.');
+      }
+
+      const tagihanEvent = anggotaTertagih.map((anggota) => ({
+        event_adat_id: event.id,
+        anggota_id: anggota.id,
+        total_nominal: Number(tarif_default),
+        nominal: Number(tarif_default),
+        jumlah_dibayar: 0,
+        status_bayar: 'BELUM_LUNAS',
+        tanggal_kejadian: tanggal_event,
+        keterangan: nama_event,
+      }));
+      const { error: tagihanError } = await privilegedSupabase.from('tagihan_krama').insert(tagihanEvent);
+      if (tagihanError) {
+        await privilegedSupabase.from('event_adat').delete().eq('id', event.id);
+        throw tagihanError;
+      }
+
+      successMessage = `Event dan ${anggotaTertagih.length} tagihan berhasil dibuat.`;
+    }
+  } catch (err: any) {
+    errorMessage = 'Terjadi kesalahan: ' + err.message;
+  }
+}
+
+// Ambil data untuk Bendahara
+const privilegedSupabase = createSupabaseAdminClient();
+const { data: listSetoran, error: listSetoranError } = await privilegedSupabase
+  .from('setoran_regu')
+  .select('*, anggota!setoran_regu_kepala_regu_id_fkey(nama_lengkap), regu(nama_regu)')
+  .order('created_at', { ascending: false });
+if (listSetoranError) {
+  errorMessage = `Gagal memuat pengajuan setoran: ${listSetoranError.message}`;
+}
+
+const { data: listAnggota } = await privilegedSupabase
+  .from('anggota')
+  .select('*')
+  .order('nama_lengkap', { ascending: true });
+
+const { data: listRegu } = await privilegedSupabase
+  .from('regu')
+  .select('id, nama_regu')
+  .order('nama_regu', { ascending: true });
+
+const { data: listEvent } = await privilegedSupabase
+  .from('event_adat')
+  .select('*')
+  .order('tanggal_event', { ascending: false });
+
+// Ambil riwayat transaksi / tagihan krama secara aman
+const { data: listHistory } = await privilegedSupabase
+  .from('tagihan_krama')
+  .select('*')
+  .order('created_at', { ascending: false });
+
+const { data: listPayments } = await privilegedSupabase
+  .from('riwayat_pembayaran_cicilan')
+  .select('id, anggota_id, tagihan_krama_id, setoran_regu_id, nominal_bayar, tanggal_bayar, metode_pembayaran, keterangan, created_at')
+  .order('tanggal_bayar', { ascending: false });
+
+const { data: listTransaksiKas, error: listTransaksiKasError } = await privilegedSupabase
+  .from('transaksi_kas')
+  .select('*')
+  .order('tanggal', { ascending: false })
+  .order('created_at', { ascending: false });
+if (listTransaksiKasError) errorMessage = `Gagal memuat buku kas: ${listTransaksiKasError.message}`;
+
+const { data: tagihanTahunan } = await privilegedSupabase
+  .from('tagihan_krama')
+  .select('id, anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, no_hp, status_aktif)')
+  .in('status_bayar', ['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
+const listTagihanTahunanPasif = (tagihanTahunan || []).filter((tagihan) =>
+  (Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event)?.jenis_event === 'TAHUNAN'
+  && (Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota)?.status_aktif === 'TIDAK_AKTIF'
+);
+
+const anggotaById = new Map((listAnggota || []).map((anggota) => [anggota.id, anggota]));
+const totalPembayaranByTagihan = new Map<string, number>();
+for (const payment of listPayments || []) {
+  if (!payment.tagihan_krama_id) continue;
+  totalPembayaranByTagihan.set(
+    payment.tagihan_krama_id,
+    (totalPembayaranByTagihan.get(payment.tagihan_krama_id) || 0) + Number(payment.nominal_bayar || 0),
+  );
+}
+
+const getLedgerTimestamp = (date: string, fallback?: string | null) => {
+  const value = date || fallback?.split('T')[0] || '';
+  const timestamp = Date.parse(`${value}T12:00:00`);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+};
+const ledgerEntries: any[] = [];
+
+for (const bill of listHistory || []) {
+  const anggotaId = bill.anggota_id || bill.krama_id;
+  const member = anggotaById.get(anggotaId);
+  const date = bill.tanggal_kejadian || bill.created_at?.split('T')[0] || '';
+  const timestamp = getLedgerTimestamp(date, bill.created_at);
+  const nominal = Number(bill.total_nominal ?? bill.nominal ?? 0);
+  const paidRecorded = Number(bill.jumlah_dibayar || 0);
+  const paidDetailed = totalPembayaranByTagihan.get(bill.id) || 0;
+
+  ledgerEntries.push({
+    id: `tagihan-${bill.id}`,
+    billId: bill.id,
+    key: bill.id,
+    anggotaId,
+    tipe: 'TAGIHAN',
+    tanggalSort: date,
+    timestamp,
+    urutanTanggal: 0,
+    noBukti: `TAG-${bill.id.slice(0, 8).toUpperCase()}`,
+    namaAnggota: member?.nama_lengkap || 'Anggota tidak ditemukan',
+    statusKrama: member?.status_aktif || 'BELUM_DILENGKAPI',
+    keteranganRiwayat: bill.keterangan || bill.jenis_tagihan || 'Tagihan kewajiban',
+    status_bayar: bill.status_bayar || 'BELUM_LUNAS',
+    debit: nominal,
+    kredit: 0,
+  });
+
+  const unitemizedCredit = Math.max(0, paidRecorded - paidDetailed);
+  if (unitemizedCredit > 0) {
+    ledgerEntries.push({
+      id: `rekonsiliasi-${bill.id}`,
+      key: bill.id,
+      anggotaId,
+      tipe: 'REKONSILIASI',
+      tanggalSort: date,
+      timestamp,
+      urutanTanggal: 1,
+      noBukti: `SALDO-${bill.id.slice(0, 8).toUpperCase()}`,
+      namaAnggota: member?.nama_lengkap || 'Anggota tidak ditemukan',
+      statusKrama: member?.status_aktif || 'BELUM_DILENGKAPI',
+      keteranganRiwayat: `Saldo pembayaran lama; tanggal/rincian transaksi tidak tersedia (${bill.keterangan || 'tagihan'})`,
+      status_bayar: 'REKONSILIASI',
+      debit: 0,
+      kredit: unitemizedCredit,
+    });
+  }
+}
+
+for (const payment of listPayments || []) {
+  const member = anggotaById.get(payment.anggota_id);
+  const date = payment.tanggal_bayar?.split('T')[0] || payment.created_at?.split('T')[0] || '';
+  const timestamp = payment.tanggal_bayar ? Date.parse(payment.tanggal_bayar) : getLedgerTimestamp(date);
+  ledgerEntries.push({
+    ...payment,
+    id: `pembayaran-${payment.id}`,
+    key: payment.id,
+    paymentId: payment.id,
+    anggotaId: payment.anggota_id,
+    tipe: 'PEMBAYARAN',
+    tanggalSort: date,
+    timestamp: Number.isNaN(timestamp) ? 0 : timestamp,
+    urutanTanggal: 2,
+    noBukti: `BYR-${payment.id.slice(0, 8).toUpperCase()}`,
+    namaAnggota: member?.nama_lengkap || 'Anggota tidak ditemukan',
+    statusKrama: member?.status_aktif || 'BELUM_DILENGKAPI',
+    keteranganRiwayat: payment.keterangan || `Pembayaran ${payment.metode_pembayaran || 'diterima'}`,
+    status_bayar: 'PEMBAYARAN DICATAT',
+    debit: 0,
+    kredit: Number(payment.nominal_bayar || 0),
+  });
+}
+
+const riwayatKronologis = ledgerEntries.sort((left, right) =>
+  left.timestamp - right.timestamp
+  || left.urutanTanggal - right.urutanTanggal
+  || left.id.localeCompare(right.id),
+);
+const saldoBerjalanByAnggota = new Map<string, number>();
+for (const entry of riwayatKronologis) {
+  const saldo = (saldoBerjalanByAnggota.get(entry.anggotaId) || 0) + entry.debit - entry.kredit;
+  entry.saldoBerjalan = saldo;
+  saldoBerjalanByAnggota.set(entry.anggotaId, saldo);
+}
+const riwayatDenganNama = [...riwayatKronologis].sort((left, right) =>
+  right.timestamp - left.timestamp
+  || right.urutanTanggal - left.urutanTanggal
+  || right.id.localeCompare(left.id),
+);
+const selisihSaldoLegacy = riwayatDenganNama
+  .filter((entry) => entry.tipe === 'REKONSILIASI')
+  .reduce((total, entry) => total + entry.kredit, 0);
+const totalDebetLedger = riwayatDenganNama.reduce((total, entry) => total + entry.debit, 0);
+const totalKreditLedger = riwayatDenganNama.reduce((total, entry) => total + entry.kredit, 0);
+const totalSaldoLedger = [...saldoBerjalanByAnggota.values()].reduce((total, saldo) => total + saldo, 0);
+
+const cashMovements: any[] = [];
+for (const setoran of listSetoran || []) {
+  const reversedByAdmin = (setoran.keterangan || '').includes('[PEMBALIKAN ADMIN]');
+  if (setoran.status_verifikasi !== 'VERIFIED' && !reversedByAdmin) continue;
+  const setoranDate = (setoran.status_verifikasi === 'VERIFIED' ? setoran.tanggal_verifikasi : setoran.created_at)?.split('T')[0] || '';
+  const setoranAmount = Number(setoran.total_nominal || 0);
+  const cashDescription = `Setoran ${setoran.regu?.nama_regu || 'regu'} - ${setoran.anggota?.nama_lengkap || 'Kepala Regu'}`;
+  const depositTimestamp = getLedgerTimestamp(setoranDate, setoran.created_at);
+  cashMovements.push({
+    id: `kas-setoran-${setoran.id}`,
+    tanggal: setoranDate,
+    timestamp: depositTimestamp,
+    sourceOrder: 0,
+    referensi: `STR-${setoran.id.slice(0, 8).toUpperCase()}`,
+    jenis: 'MASUK',
+    kategori: 'Setoran Regu',
+    pihak: setoran.anggota?.nama_lengkap || setoran.regu?.nama_regu || 'Regu',
+    keterangan: cashDescription,
+    debit: setoranAmount,
+    kredit: 0,
+  });
+
+  if (reversedByAdmin) {
+    const reversalDate = setoran.tanggal_verifikasi?.split('T')[0] || setoranDate;
+    cashMovements.push({
+      id: `kas-balik-setoran-${setoran.id}`,
+      tanggal: reversalDate,
+      timestamp: getLedgerTimestamp(reversalDate, setoran.tanggal_verifikasi),
+      sourceOrder: 2,
+      referensi: `REV-${setoran.id.slice(0, 8).toUpperCase()}`,
+      jenis: 'PEMBALIKAN',
+      kategori: 'Pembalikan Setoran',
+      pihak: setoran.anggota?.nama_lengkap || setoran.regu?.nama_regu || 'Regu',
+      keterangan: 'Pembalikan setoran terverifikasi',
+      debit: 0,
+      kredit: setoranAmount,
+    });
+  }
+}
+
+for (const payment of listPayments || []) {
+  if (payment.metode_pembayaran !== 'CASH_BENDAHARA' || payment.setoran_regu_id) continue;
+  const member = anggotaById.get(payment.anggota_id);
+  const date = payment.tanggal_bayar?.split('T')[0] || payment.created_at?.split('T')[0] || '';
+  const timestamp = payment.tanggal_bayar ? Date.parse(payment.tanggal_bayar) : getLedgerTimestamp(date);
+  cashMovements.push({
+    id: `kas-pembayaran-${payment.id}`,
+    tanggal: date,
+    timestamp: Number.isNaN(timestamp) ? 0 : timestamp,
+    sourceOrder: 1,
+    referensi: `BYR-${payment.id.slice(0, 8).toUpperCase()}`,
+    jenis: 'MASUK',
+    kategori: 'Pembayaran Langsung Krama',
+    pihak: member?.nama_lengkap || 'Anggota tidak ditemukan',
+    keterangan: payment.keterangan || 'Pembayaran diterima langsung Bendahara',
+    debit: Number(payment.nominal_bayar || 0),
+    kredit: 0,
+  });
+}
+
+for (const transaction of listTransaksiKas || []) {
+  const isCashOpening = transaction.arah === 'SALDO_AWAL';
+  const isCashIn = transaction.arah === 'MASUK' || isCashOpening;
+  cashMovements.push({
+    id: `kas-manual-${transaction.id}`,
+    tanggal: transaction.tanggal,
+    timestamp: getLedgerTimestamp(transaction.tanggal, transaction.created_at),
+    sourceOrder: isCashOpening ? -1 : 2,
+    referensi: `${isCashOpening ? 'SAL' : isCashIn ? 'MSK' : 'KLR'}-${transaction.id.slice(0, 8).toUpperCase()}`,
+    jenis: transaction.arah,
+    kategori: transaction.kategori,
+    pihak: transaction.penerima,
+    keterangan: transaction.keterangan,
+    metode: transaction.metode_pembayaran,
+    buktiUrl: transaction.bukti_url,
+    debit: isCashIn ? Number(transaction.nominal || 0) : 0,
+    kredit: isCashIn ? 0 : Number(transaction.nominal || 0),
+  });
+}
+
+const cashOpeningMovement = cashMovements.find((movement) => movement.jenis === 'SALDO_AWAL');
+const cashPeriodMovements = cashOpeningMovement
+  ? cashMovements.filter((movement) => movement.timestamp >= cashOpeningMovement.timestamp)
+  : cashMovements;
+const cashMovementsChronological = cashPeriodMovements.sort((left, right) =>
+  left.timestamp - right.timestamp || left.sourceOrder - right.sourceOrder || left.id.localeCompare(right.id),
+);
+let runningCashBalance = 0;
+for (const movement of cashMovementsChronological) {
+  runningCashBalance += movement.debit - movement.kredit;
+  movement.saldo = runningCashBalance;
+}
+const cashLedger = [...cashMovementsChronological].sort((left, right) =>
+  right.timestamp - left.timestamp || right.sourceOrder - left.sourceOrder || right.id.localeCompare(left.id),
+);
+const totalKasMasuk = cashPeriodMovements.filter((movement) => movement.jenis !== 'SALDO_AWAL').reduce((total, movement) => total + movement.debit, 0);
+const totalKasKeluar = cashPeriodMovements.reduce((total, movement) => total + movement.kredit, 0);
+const labelKategoriKas = (category: string) => ({
+  BANTUAN_DUKA: 'Bantuan keluarga berduka',
+  BANTUAN_PERNIKAHAN: 'Pembayaran kepada mempelai',
+  OPERASIONAL: 'Operasional banjar',
+  LAINNYA: 'Pengeluaran lainnya',
+  PEMASUKAN_LAIN: 'Pemasukan lain',
+  SUMBANGAN: 'Sumbangan',
+  PENGEMBALIAN_DANA: 'Pengembalian dana',
+  SALDO_AWAL_KAS: 'Saldo awal kas',
+  'Pembalikan Setoran': 'Pembalikan setoran',
+}[category] || category);
+
+---
+
+<LayoutDashboard title="Portal Bendahara - Banjar Adat" role="BENDAHARA">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+    
+    <!-- Header Bendahara -->
+    <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
+      <div>
+        <span class="text-xs font-bold px-3 py-1 bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-full">
+          Portal Bendahara Keuangan Banjar
+        </span>
+        <h1 class="text-xl md:text-2xl font-black mt-2">Verifikasi Setoran, Denda, & Master Tarif Adat</h1>
+      </div>
+      <div class="text-xs text-slate-400">
+        <span>Total Anggota: <strong class="text-white">{listAnggota?.length || 0} Krama</strong></span>
+      </div>
+      <a href="/daftar-krama" class="no-print inline-flex items-center justify-center gap-2 rounded-lg border border-amber-400/50 bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 transition hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="h-4 w-4">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M16 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2m16 0v-2a4 4 0 0 0-3-3.87M14 3.13a4 4 0 0 1 0 7.75M14 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" />
+        </svg>
+        Direktori Krama
+      </a>
+      <form action="/kepalaregu" method="GET" class="no-print flex flex-wrap items-center gap-2">
+        <label for="pilih-regu-lihat" class="text-xs font-semibold text-slate-300">Lihat regu:</label>
+        <select id="pilih-regu-lihat" name="regu" required class="rounded-lg border border-slate-600 bg-slate-800 px-2.5 py-2 text-xs text-white">
+          <option value="">Pilih regu</option>
+          {listRegu?.map((regu) => <option value={regu.id}>{regu.nama_regu}</option>)}
+        </select>
+        <button type="submit" class="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400">Buka Portal Regu</button>
+      </form>
+    </div>
+
+    {successMessage && (
+      <div class="p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold rounded-xl">
+        {successMessage}
+      </div>
+    )}
+    {errorMessage && (
+      <div class="p-4 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold rounded-xl">
+        {errorMessage}
+      </div>
+    )}
+
+    <section class="no-print space-y-3">
+      <div>
+        <h2 class="text-sm font-bold text-slate-900">Pencatatan Bendahara</h2>
+        <p class="mt-1 text-xs text-slate-500">Pilih tindakan untuk membuka form pencatatan.</p>
+      </div>
+      <nav aria-label="Navigasi form Bendahara" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7">
+        <button type="button" data-open-dialog="dialog-saldo-awal" class="flex min-h-14 items-center gap-3 rounded-lg border border-blue-200 bg-white px-3 py-2 text-left text-xs font-bold text-blue-900 transition hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-blue-600">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-100 text-sm" aria-hidden="true">+</span>
+          <span>Posting saldo awal</span>
+        </button>
+        <button type="button" data-open-dialog="dialog-denda" class="flex min-h-14 items-center gap-3 rounded-lg border border-red-200 bg-white px-3 py-2 text-left text-xs font-bold text-red-900 transition hover:bg-red-50 focus-visible:outline-2 focus-visible:outline-red-600">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-red-100 text-sm" aria-hidden="true">!</span>
+          <span>Input denda manual</span>
+        </button>
+        <button type="button" data-open-dialog="dialog-pembayaran-numbas" class="flex min-h-14 items-center gap-3 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-left text-xs font-bold text-emerald-900 transition hover:bg-emerald-50 focus-visible:outline-2 focus-visible:outline-emerald-600">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-100 text-sm" aria-hidden="true">Rp</span>
+          <span>Pembayaran Numbas Ayahan</span>
+        </button>
+        <button type="button" data-open-dialog="dialog-master-event" class="flex min-h-14 items-center gap-3 rounded-lg border border-amber-200 bg-white px-3 py-2 text-left text-xs font-bold text-amber-950 transition hover:bg-amber-50 focus-visible:outline-2 focus-visible:outline-amber-600">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-amber-100 text-sm" aria-hidden="true">&#9733;</span>
+          <span>Master tarif & event</span>
+        </button>
+        <button type="button" data-open-dialog="dialog-pengeluaran-kas" class="col-span-2 flex min-h-14 items-center gap-3 rounded-lg border border-slate-300 bg-slate-900 px-3 py-2 text-left text-xs font-bold text-white transition hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-slate-700 sm:col-span-1">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-white/10 text-sm" aria-hidden="true">&minus;</span>
+          <span>Catat pengeluaran kas</span>
+        </button>
+        <button type="button" data-open-dialog="dialog-pemasukan-kas" class="flex min-h-14 items-center gap-3 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-left text-xs font-bold text-emerald-900 transition hover:bg-emerald-50 focus-visible:outline-2 focus-visible:outline-emerald-600">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-100 text-sm" aria-hidden="true">+</span>
+          <span>Pemasukan lain</span>
+        </button>
+        <button type="button" data-open-dialog="dialog-saldo-awal-kas" class="flex min-h-14 items-center gap-3 rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-xs font-bold text-slate-800 transition hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-slate-600">
+          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-slate-100 text-sm" aria-hidden="true">&#8634;</span>
+          <span>Saldo awal kas</span>
+        </button>
+      </nav>
+    </section>
+
+    <!-- SECTION 1: VERIFIKASI SETORAN KEPALA REGU -->
+    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+      <div>
+        <h2 class="text-base font-bold text-slate-800">Verifikasi Setoran Tunai dari Kepala Regu</h2>
+        <p class="text-xs text-slate-500 mt-0.5">Setujui setoran kas regu yang masuk untuk memperbarui saldo keuangan banjar.</p>
+      </div>
+
+      <div id="bendahara-setoran-report" class="space-y-3">
+      <div class="flex justify-end">
+        <PrintReportButton targetId="bendahara-setoran-report" title="Laporan Setoran dari Kepala Regu" />
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs text-left text-slate-600">
+          <thead class="bg-slate-50 text-slate-500 uppercase border-b border-slate-200">
+            <tr>
+              <th class="p-3">Regu / Pelapor</th>
+              <th class="p-3 text-right">Nominal Tunai</th>
+              <th class="p-3 text-center">Status Saat Ini</th>
+              <th class="print-hide p-3 text-center">Aksi Verifikasi</th>
+            </tr>
+          </thead>
+          <tbody id="bendahara-setoran-rows" class="divide-y divide-slate-100">
+            {listSetoran && listSetoran.length > 0 ? (
+              listSetoran.map((setoran) => (
+                <tr class="page-row hover:bg-slate-50">
+                  <td class="p-3 font-semibold text-slate-900">
+                    {setoran.regu?.nama_regu || 'Regu belum ditentukan'} <span class="text-slate-400 font-normal">({setoran.anggota?.nama_lengkap || 'Kepala Regu'})</span>
+                  </td>
+                  <td class="p-3 text-right font-bold text-slate-900">{formatRupiah(setoran.total_nominal)}</td>
+                  <td class="print-hide p-3 text-center">
+                    <span class={`px-2.5 py-1 rounded-full text-[10px] font-bold ${
+                      setoran.status_verifikasi === 'VERIFIED' ? 'bg-emerald-100 text-emerald-800' :
+                      setoran.status_verifikasi === 'REJECTED' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {setoran.status_verifikasi || 'PENDING'}
+                    </span>
+                  </td>
+                  <td class="p-3 text-center">
+                    {setoran.status_verifikasi === 'PENDING' ? (
+                      <form method="POST" class="inline-flex gap-2">
+                        <input type="hidden" name="action" value="verifikasi_setoran" />
+                        <input type="hidden" name="setoran_id" value={setoran.id} />
+                        <button type="submit" name="status" value="VERIFIED" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition">
+                          Setujui
+                        </button>
+                        <button type="submit" name="status" value="REJECTED" class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg transition">
+                          Tolak
+                        </button>
+                      </form>
+                    ) : (
+                      <span class="text-xs text-slate-400">Sudah diproses</span>
+                    )}
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colspan="4" class="p-6 text-center text-slate-400 italic">Belum ada rekap setoran dari kepala regu.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-table-pagination="bendahara-setoran-rows">
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="text-xs font-semibold text-slate-600">Baris per halaman
+            <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select>
+          </label>
+          <span data-page-summary class="text-xs text-slate-500" aria-live="polite"></span>
+        </div>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" data-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">&larr;</button>
+          <nav data-page-links class="flex flex-wrap items-center justify-center gap-1" aria-label="Navigasi halaman setoran" aria-live="polite"></nav>
+          <button type="button" data-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">&rarr;</button>
+        </div>
+      </div>
+      </div>
+    </div>
+
+    <!-- GRID SECTION 2: FORM INPUT & MASTER EVENT -->
+    <div class="contents">
+      
+      <!-- Form Input Denda Manual -->
+      <dialog id="dialog-denda" class="w-full max-w-2xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-base font-bold text-slate-800">Input Denda Manual</h2>
+            <p class="text-xs text-slate-500 mt-0.5">Catat denda paruman atau cicilan kewajiban krama secara manual.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-denda" aria-label="Tutup form denda" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+
+        <form method="POST" class="space-y-3">
+          <input type="hidden" name="action" value="simpan_denda_cicilan" />
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Pilih Anggota Krama</label>
+            <input type="hidden" id="anggota_id" name="anggota_id" required />
+            <input
+              type="search"
+              id="anggota-search"
+              autocomplete="off"
+              placeholder="Ketik nama, nomor HP, atau regu..."
+              aria-controls="anggota-suggestions"
+              aria-autocomplete="list"
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs focus:border-blue-500 focus:outline-none"
+            />
+            <div id="anggota-selected" class="mt-2 hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900" aria-live="polite"></div>
+            <ul id="anggota-suggestions" class="mt-1 hidden max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg" role="listbox">
+              {listAnggota?.map((krama) => (
+                <li
+                  class="anggota-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-blue-50"
+                  data-id={krama.id}
+                  data-name={krama.nama_lengkap || ''}
+                  data-phone={krama.no_hp || ''}
+                  data-regu={krama.no_regu || ''}
+                  role="option"
+                  aria-selected="false"
+                >
+                  <span class="font-semibold text-slate-900">{krama.nama_lengkap || 'Tanpa nama'}</span>
+                  <span class="ml-2 text-slate-500">{krama.no_hp || 'Tanpa nomor HP'} · Regu {krama.no_regu || '-'}</span>
+                </li>
+              ))}
+              <li id="anggota-empty" class="hidden px-3 py-2 text-xs text-slate-500">Anggota tidak ditemukan.</li>
+            </ul>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Jenis Catatan</label>
+              <select name="jenis" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+                <option value="DENDA">DENDA</option>
+                <option value="CICILAN">Cicilan Numbas Ayahan</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nominal (Rp)</label>
+              <input type="number" name="nominal" required placeholder="50000" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tanggal Kejadian / Pencatatan</label>
+            <input type="date" name="tanggal_kejadian" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Keterangan</label>
+            <textarea name="keterangan" rows="2" placeholder="Contoh: Keterlambatan hadir paruman adat..." class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50"></textarea>
+          </div>
+
+          <button type="submit" class="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition">
+            Simpan Catatan Keuangan
+          </button>
+        </form>
+      </div>
+      </dialog>
+
+      <!-- Form Pembayaran Numbas Ayahan -->
+      <dialog id="dialog-pembayaran-numbas" class="w-full max-w-2xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-base font-bold text-slate-800">Form Pembayaran Numbas Ayahan</h2>
+            <p class="text-xs text-slate-500 mt-0.5">Catat pembayaran tahunan Numbas Ayahan.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-pembayaran-numbas" aria-label="Tutup form pembayaran" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+
+        <form method="POST" id="numbas-ayahan-form" class="space-y-3">
+          <input type="hidden" name="action" value="bayar_numbas_ayahan" />
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Pilih Numbas Ayahan / Tagihan Tahunan</label>
+            <select id="numbas-tagihan" name="tagihan_id" required class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs">
+              <option value="">-- Pilih Krama dan Tagihan --</option>
+              {listTagihanTahunanPasif.map((tagihan) => {
+                const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+                const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
+                const anggotaTahunan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+                const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
+                return (
+                  <option value={tagihan.id} data-sisa={sisaTagihan}>
+                    {anggotaTahunan?.nama_lengkap || 'Krama'} — {eventTahunan?.nama_event || 'Numbas Ayahan'} (Sisa: {formatRupiah(sisaTagihan)})
+                  </option>
+                );
+              })}
+            </select>
+            {listTagihanTahunanPasif.length === 0 && (
+              <p class="mt-1 text-[10px] text-slate-500">Tidak ada tagihan tahunan Numbas Ayahan yang belum lunas.</p>
+            )}
+          </div>
+
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nominal Diterima (Rp)</label>
+              <input id="numbas-nominal" type="number" name="nominal_bayar" min="1" step="1" required placeholder="Masukkan nominal" class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs" />
+              <p id="numbas-sisa" class="mt-1 text-[10px] text-slate-500">Pilih tagihan untuk melihat sisa kewajiban.</p>
+            </div>
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tanggal Pembayaran</label>
+              <input type="date" name="tanggal_bayar" required value={new Date().toISOString().slice(0, 10)} class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Keterangan / Bukti</label>
+            <input type="text" name="keterangan" placeholder="Contoh: Tunai diterima di balai banjar" class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs" />
+          </div>
+
+          <button type="submit" disabled={listTagihanTahunanPasif.length === 0} class="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+            Simpan Pembayaran Numbas Ayahan
+          </button>
+        </form>
+      </div>
+      </dialog>
+
+      <!-- Form Buat Master Tarif & Event Adat -->
+      <dialog id="dialog-master-event" class="w-full max-w-2xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 class="text-base font-bold text-slate-800">Master Tarif & Event Adat</h2>
+            <p class="text-xs text-slate-500 mt-0.5">Tentukan besaran iuran wajib krama untuk event banjar.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-master-event" aria-label="Tutup form event" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+
+        <form method="POST" class="space-y-3">
+          <input type="hidden" name="action" value="buat_event" />
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nama Event / Iuran</label>
+            <input type="text" name="nama_event" required placeholder="Contoh: Piodalan Pura Desa" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Jenis Event</label>
+              <select id="jenis-event" name="jenis_event" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+                <option value="PIODALAN">Piodalan</option>
+                <option value="KEMATIAN">Kematian</option>
+                <option value="PERNIKAHAN">Pernikahan</option>
+                <option value="BULANAN">Iuran Bulanan</option>
+                <option value="TAHUNAN">Iuran Tahunan</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tarif Default (Rp)</label>
+              <input type="number" name="tarif_default" required placeholder="50000" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Keanggotaan yang Dikenai</label>
+            <select id="target-status-keanggotaan" name="target_status_keanggotaan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+              <option value="AKTIF">Ngayah saja</option>
+              <option value="SEMUA" selected>Ngayah dan Numbas Ayahan</option>
+              <option value="TIDAK_AKTIF" disabled>Numbas Ayahan saja (khusus iuran tahunan)</option>
+            </select>
+            <p id="target-status-note" class="mt-1 text-[10px] text-slate-500">Iuran tahunan otomatis dikenakan hanya kepada Numbas Ayahan.</p>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tanggal Pelaksanaan</label>
+            <input type="date" name="tanggal_event" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <button type="submit" class="w-full py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl transition">
+            Simpan Master Event
+          </button>
+        </form>
+      </div>
+      </dialog>
+
+    </div>
+
+    <dialog id="dialog-saldo-awal" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="space-y-5 bg-white p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs font-bold uppercase text-blue-700">Buku Kewajiban Krama</p>
+            <h2 class="mt-1 text-lg font-black text-slate-900">Posting Saldo Awal</h2>
+            <p class="mt-1 text-xs text-slate-500">Saldo awal diposting sebagai debet piutang, bukan pembayaran.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-saldo-awal" aria-label="Tutup form saldo awal" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4">
+          <input type="hidden" name="action" value="posting_saldo_awal" />
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Pilih krama</span>
+            <input type="hidden" id="saldo-awal-anggota-id" name="anggota_id" />
+            <input
+              type="search"
+              id="saldo-awal-anggota-search"
+              autocomplete="off"
+              placeholder="Cari nama, nomor HP, regu, atau tempekan..."
+              aria-controls="saldo-awal-anggota-options"
+              aria-autocomplete="list"
+              class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            />
+            <div id="saldo-awal-anggota-selected" class="mt-2 hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900" aria-live="polite"></div>
+            <ul id="saldo-awal-anggota-options" class="mt-1 hidden max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg" role="listbox">
+              {listAnggota?.map((anggota) => (
+                <li
+                  class="saldo-awal-anggota-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-blue-50"
+                  data-id={anggota.id}
+                  data-name={anggota.nama_lengkap || ''}
+                  data-phone={anggota.no_hp || ''}
+                  data-regu={anggota.no_regu || ''}
+                  data-tempekan={anggota.tempekan || ''}
+                  role="option"
+                  aria-selected="false"
+                  tabindex="0"
+                >
+                  <span class="font-semibold text-slate-900">{anggota.nama_lengkap || 'Tanpa nama'}</span>
+                  <span class="ml-2 text-slate-500">{anggota.no_hp || 'Tanpa nomor HP'} · Regu {anggota.no_regu || '-'} · {anggota.tempekan || 'Tanpa tempekan'}</span>
+                </li>
+              ))}
+              <li id="saldo-awal-anggota-empty" class="hidden px-3 py-2 text-xs text-slate-500" role="status">Tidak ada anggota yang cocok.</li>
+            </ul>
+          </label>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Tanggal saldo awal</span>
+              <input type="date" name="tanggal" required value={new Date().toISOString().slice(0, 10)} class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Nominal kewajiban (Rp)</span>
+              <input type="number" name="nominal" min="1" step="1" required placeholder="0" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+            </label>
+          </div>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Keterangan / periode saldo</span>
+            <textarea name="keterangan" rows="2" required placeholder="Contoh: Tunggakan kewajiban sampai dengan Oktober 2026" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"></textarea>
+          </label>
+          <div class="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" data-close-dialog="dialog-saldo-awal" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Batal</button>
+            <button type="submit" class="rounded-lg bg-blue-700 px-4 py-2 text-xs font-bold text-white hover:bg-blue-800">Posting Debet Saldo Awal</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog id="dialog-pemasukan-kas" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="space-y-5 bg-white p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs font-bold uppercase text-emerald-700">Buku Kas Banjar</p>
+            <h2 class="mt-1 text-lg font-black text-slate-900">Catat Pemasukan Lain</h2>
+            <p class="mt-1 text-xs text-slate-500">Untuk penerimaan yang bukan setoran regu atau pembayaran krama yang sudah tercatat.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-pemasukan-kas" aria-label="Tutup form pemasukan" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4" onsubmit="return confirm('Posting pemasukan ini ke Buku Kas Banjar?');">
+          <input type="hidden" name="action" value="catat_pemasukan_kas" />
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Tanggal diterima</span>
+              <input type="date" name="tanggal" required value={new Date().toISOString().slice(0, 10)} class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Kategori pemasukan</span>
+              <select name="kategori" required class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100">
+                <option value="PEMASUKAN_LAIN">Pemasukan lain</option>
+                <option value="SUMBANGAN">Sumbangan</option>
+                <option value="PENGEMBALIAN_DANA">Pengembalian dana</option>
+              </select>
+            </label>
+          </div>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Sumber dana</span>
+            <input type="text" name="sumber" required maxlength="200" placeholder="Nama penyumbang / sumber dana" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100" />
+          </label>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Nominal masuk (Rp)</span>
+              <input type="number" name="nominal" min="1" step="1" required placeholder="0" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Metode</span>
+              <select name="metode_pembayaran" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100">
+                <option value="TUNAI">Tunai</option>
+                <option value="TRANSFER">Transfer</option>
+                <option value="LAINNYA">Lainnya</option>
+              </select>
+            </label>
+          </div>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Keterangan</span>
+            <textarea name="keterangan" rows="2" required maxlength="1000" placeholder="Tujuan atau dasar pemasukan" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100"></textarea>
+          </label>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Link bukti (opsional)</span>
+            <input type="url" name="bukti_url" placeholder="https://..." class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-100" />
+          </label>
+          <div class="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" data-close-dialog="dialog-pemasukan-kas" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Batal</button>
+            <button type="submit" class="rounded-lg bg-emerald-700 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-800">Posting Pemasukan</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog id="dialog-saldo-awal-kas" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="space-y-5 bg-white p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs font-bold uppercase text-slate-600">Awal periode buku kas</p>
+            <h2 class="mt-1 text-lg font-black text-slate-900">Posting Saldo Awal Kas</h2>
+            <p class="mt-1 text-xs text-slate-500">Masukkan hasil kas fisik pada tanggal mulai pencatatan. Hanya boleh diposting satu kali.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-saldo-awal-kas" aria-label="Tutup form saldo awal kas" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4" onsubmit="return confirm('Jadikan nominal ini sebagai saldo pembuka Buku Kas? Transaksi sebelum tanggal tersebut tidak akan dijumlahkan ke saldo berjalan periode ini.');">
+          <input type="hidden" name="action" value="posting_saldo_awal_kas" />
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Tanggal mulai buku kas</span>
+              <input type="date" name="tanggal" required value={new Date().toISOString().slice(0, 10)} class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Saldo kas fisik (Rp)</span>
+              <input type="number" name="nominal" min="0" step="1" required placeholder="0" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100" />
+            </label>
+          </div>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Sumber / keterangan saldo awal</span>
+            <textarea name="sumber" rows="2" required maxlength="1000" placeholder="Contoh: Hasil pemeriksaan kas dan rekening pada awal periode" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100"></textarea>
+          </label>
+          <div class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">Transaksi sebelum tanggal saldo awal tetap tersimpan sebagai riwayat, tetapi tidak dihitung lagi ke saldo berjalan setelah tanggal pembuka.</div>
+          <div class="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" data-close-dialog="dialog-saldo-awal-kas" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Batal</button>
+            <button type="submit" class="rounded-lg bg-slate-900 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800">Posting Saldo Pembuka</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <dialog id="dialog-pengeluaran-kas" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="space-y-5 bg-white p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs font-bold uppercase text-slate-500">Buku Kas Banjar</p>
+            <h2 class="mt-1 text-lg font-black text-slate-900">Catat Pengeluaran Kas</h2>
+            <p class="mt-1 text-xs text-slate-500">Pengeluaran mengurangi saldo kas dan tidak mengubah kewajiban anggota.</p>
+          </div>
+          <button type="button" data-close-dialog="dialog-pengeluaran-kas" aria-label="Tutup form pengeluaran" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+        <form method="POST" class="space-y-4" onsubmit="return confirm('Posting pengeluaran kas ini? Nominal akan mengurangi saldo buku kas banjar.');">
+          <input type="hidden" name="action" value="catat_pengeluaran_kas" />
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Tanggal pengeluaran</span>
+              <input type="date" name="tanggal" required value={new Date().toISOString().slice(0, 10)} class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Kategori</span>
+              <select name="kategori" required class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100">
+                <option value="BANTUAN_DUKA">Bantuan keluarga berduka</option>
+                <option value="BANTUAN_PERNIKAHAN">Pembayaran kepada mempelai</option>
+                <option value="OPERASIONAL">Operasional banjar</option>
+                <option value="LAINNYA">Pengeluaran lainnya</option>
+              </select>
+            </label>
+          </div>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Penerima dana</span>
+            <input type="text" name="penerima" required maxlength="200" placeholder="Nama keluarga / penerima / pihak ketiga" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100" />
+          </label>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Nominal keluar (Rp)</span>
+              <input type="number" name="nominal" min="1" step="1" required placeholder="0" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Metode</span>
+              <select name="metode_pembayaran" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100">
+                <option value="TUNAI">Tunai</option>
+                <option value="TRANSFER">Transfer</option>
+                <option value="LAINNYA">Lainnya</option>
+              </select>
+            </label>
+          </div>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Keterangan / tujuan</span>
+            <textarea name="keterangan" rows="2" required maxlength="1000" placeholder="Jelaskan tujuan dan dasar pengeluaran" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100"></textarea>
+          </label>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Link bukti (opsional)</span>
+            <input type="url" name="bukti_url" placeholder="https://..." class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-100" />
+          </label>
+          <div class="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" data-close-dialog="dialog-pengeluaran-kas" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Batal</button>
+            <button type="submit" class="rounded-lg bg-slate-900 px-4 py-2 text-xs font-bold text-white hover:bg-slate-800">Posting Pengeluaran</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+    <!-- SECTION 3: DAFTAR EVENT AKTIF -->
+    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+      <h2 class="text-base font-bold text-slate-800">Daftar Master Tarif & Event Adat Aktif</h2>
+      <div id="bendahara-event-report" class="space-y-3">
+      <div class="flex justify-end">
+        <PrintReportButton targetId="bendahara-event-report" title="Laporan Master Tarif dan Event Adat" />
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-xs text-left text-slate-600">
+          <thead class="bg-slate-50 text-slate-500 uppercase border-b border-slate-200">
+            <tr>
+              <th class="p-3">Nama Event</th>
+              <th class="p-3">Jenis</th>
+              <th class="p-3">Dikenakan Kepada</th>
+              <th class="p-3 text-right">Tarif Default</th>
+              <th class="p-3 text-center">Tanggal Pelaksanaan</th>
+            </tr>
+          </thead>
+          <tbody id="bendahara-event-rows" class="divide-y divide-slate-100">
+            {listEvent && listEvent.length > 0 ? (
+              listEvent.map((evt) => (
+                <tr class="page-row hover:bg-slate-50">
+                  <td class="p-3 font-semibold text-slate-900">{evt.nama_event}</td>
+                  <td class="p-3"><span class="px-2 py-0.5 bg-slate-100 rounded-full font-bold text-[10px]">{evt.jenis_event}</span></td>
+                  <td class="p-3">{evt.target_status_keanggotaan === 'TIDAK_AKTIF' ? labelStatusKeanggotaan('TIDAK_AKTIF') : evt.target_status_keanggotaan === 'AKTIF' ? labelStatusKeanggotaan('AKTIF') : 'Ngayah & Numbas Ayahan'}</td>
+                  <td class="p-3 text-right font-bold text-slate-900">{formatRupiah(evt.tarif_default)}</td>
+                  <td class="p-3 text-center">{evt.tanggal_event || '-'}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colspan="5" class="p-6 text-center text-slate-400 italic">Belum ada event adat terdaftar.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-table-pagination="bendahara-event-rows">
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="text-xs font-semibold text-slate-600">Baris per halaman
+            <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select>
+          </label>
+          <span data-page-summary class="text-xs text-slate-500" aria-live="polite"></span>
+        </div>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" data-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">&larr;</button>
+          <nav data-page-links class="flex flex-wrap items-center justify-center gap-1" aria-label="Navigasi halaman event" aria-live="polite"></nav>
+          <button type="button" data-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">&rarr;</button>
+        </div>
+      </div>
+      </div>
+    </div>
+
+    <section id="bendahara-cash-report" class="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-xs font-bold uppercase text-slate-500">Kas Banjar</p>
+          <h2 class="mt-1 text-base font-bold text-slate-900">Buku Kas Masuk & Keluar</h2>
+          <p class="mt-1 text-xs text-slate-500">Setoran regu dihitung saat diverifikasi; pembayaran anggota yang masih di regu tidak dihitung sebagai kas banjar.</p>
+          {cashOpeningMovement ? (
+            <p class="mt-1 text-[11px] text-amber-800">Saldo dibuka sebesar {formatRupiah(cashOpeningMovement.debit)} pada {cashOpeningMovement.tanggal}; transaksi yang lebih lama tidak dihitung lagi dalam periode ini.</p>
+          ) : (
+            <p class="mt-1 text-[11px] text-amber-800">Saldo ini mencakup transaksi yang tercatat di sistem. Posting saldo awal kas pada tanggal cut-off agar pengeluaran dan pemasukan lama tidak membuat saldo berjalan keliru.</p>
+          )}
+        </div>
+        <PrintReportButton targetId="bendahara-cash-report" title="Buku Kas Banjar" />
+      </div>
+
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+          <p class="text-xs text-emerald-800">Total Kas Masuk</p>
+          <p class="mt-1 text-lg font-black text-emerald-950">{formatRupiah(totalKasMasuk)}</p>
+        </div>
+        <div class="rounded-lg border border-red-200 bg-red-50 p-4">
+          <p class="text-xs text-red-800">Total Kas Keluar</p>
+          <p class="mt-1 text-lg font-black text-red-950">{formatRupiah(totalKasKeluar)}</p>
+        </div>
+        <div class="rounded-lg border border-slate-300 bg-slate-50 p-4">
+          <p class="text-xs text-slate-600">{cashOpeningMovement ? 'Saldo Kas Periode Ini' : 'Saldo Kas Tercatat'}</p>
+          <p class="mt-1 text-lg font-black text-slate-950">{formatRupiah(runningCashBalance)}</p>
+        </div>
+      </div>
+
+      <div class="max-h-136 overflow-auto rounded-lg border border-slate-200">
+        <table class="w-full min-w-240 text-left text-xs text-slate-600">
+          <thead class="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase text-slate-500">
+            <tr>
+              <th class="p-3">Tanggal</th>
+              <th class="p-3">No. Bukti</th>
+              <th class="p-3">Kategori / Pihak</th>
+              <th class="p-3">Keterangan</th>
+              <th class="p-3 text-right">Debet Kas</th>
+              <th class="p-3 text-right">Kredit Kas</th>
+              <th class="p-3 text-right">Saldo</th>
+              <th class="p-3">Metode / Bukti</th>
+            </tr>
+          </thead>
+          <tbody id="bendahara-cash-rows" class="divide-y divide-slate-100">
+            {cashLedger.length ? cashLedger.map((movement) => (
+              <tr class="page-row hover:bg-slate-50">
+                <td class="whitespace-nowrap p-3">{movement.tanggal || '-'}</td>
+                <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">{movement.referensi}</td>
+                <td class="p-3">
+                  <p class={`font-semibold ${movement.jenis === 'KELUAR' || movement.jenis === 'PEMBALIKAN' ? 'text-red-800' : 'text-emerald-800'}`}>{labelKategoriKas(movement.kategori)}</p>
+                  <p class="mt-1 text-slate-500">{movement.pihak}</p>
+                </td>
+                <td class="max-w-sm whitespace-pre-wrap p-3">{movement.keterangan}</td>
+                <td class="whitespace-nowrap p-3 text-right font-semibold text-emerald-800">{movement.debit > 0 ? formatRupiah(movement.debit) : '-'}</td>
+                <td class="whitespace-nowrap p-3 text-right font-semibold text-red-800">{movement.kredit > 0 ? formatRupiah(movement.kredit) : '-'}</td>
+                <td class={`whitespace-nowrap p-3 text-right font-bold ${movement.saldo < 0 ? 'text-red-800' : 'text-slate-900'}`}>{formatRupiah(movement.saldo)}</td>
+                <td class="whitespace-nowrap p-3">
+                  <span>{movement.metode || (movement.kategori === 'Setoran Regu' ? 'Setoran terverifikasi' : movement.kategori === 'Pembayaran Langsung Krama' ? 'Tunai' : movement.jenis === 'SALDO_AWAL' ? 'Saldo pembuka' : '-')}</span>
+                  {movement.buktiUrl && <a href={movement.buktiUrl} target="_blank" rel="noreferrer" class="ml-2 font-semibold text-blue-700 hover:underline">Bukti</a>}
+                </td>
+              </tr>
+            )) : (
+              <tr><td colspan="8" class="p-8 text-center text-slate-400">Belum ada transaksi kas masuk atau keluar.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-table-pagination="bendahara-cash-rows">
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="text-xs font-semibold text-slate-600">Baris per halaman
+            <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select>
+          </label>
+          <span data-page-summary class="text-xs text-slate-500" aria-live="polite"></span>
+        </div>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" data-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">&larr;</button>
+          <nav data-page-links class="flex flex-wrap items-center justify-center gap-1" aria-label="Navigasi halaman buku kas" aria-live="polite"></nav>
+          <button type="button" data-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">&rarr;</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 4: RIWAYAT / HISTORY RECORD TRANSAKSI -->
+    <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+      <div>
+        <h2 class="text-base font-bold text-slate-800">Buku Besar Kewajiban Krama</h2>
+        <p class="text-xs text-slate-500 mt-0.5">Tagihan menambah debet, pembayaran mengurangi kewajiban melalui kredit, dengan saldo berjalan per anggota.</p>
+      </div>
+
+      <div class="flex justify-end">
+        <PrintReportButton targetId="bendahara-history-report" title="Buku Besar Kewajiban Krama" />
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div class="rounded-lg border border-blue-200 bg-blue-50 p-4">
+          <p class="text-xs text-blue-800">Total Debet Tagihan</p>
+          <p class="mt-1 text-lg font-black text-blue-950">{formatRupiah(totalDebetLedger)}</p>
+        </div>
+        <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+          <p class="text-xs text-emerald-800">Total Kredit Pembayaran</p>
+          <p class="mt-1 text-lg font-black text-emerald-950">{formatRupiah(totalKreditLedger)}</p>
+        </div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <p class="text-xs text-amber-800">Saldo Piutang Krama</p>
+          <p class="mt-1 text-lg font-black text-amber-950">{formatRupiah(totalSaldoLedger)}</p>
+        </div>
+      </div>
+      {selisihSaldoLegacy > 0 && (
+        <p class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          Termasuk {formatRupiah(selisihSaldoLegacy)} saldo pembayaran lama yang tersimpan pada tagihan tetapi tidak memiliki rincian transaksi/tanggal. Ditampilkan sebagai kredit rekonsiliasi, bukan bukti pembayaran baru.
+        </p>
+      )}
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_180px_180px]">
+        <label class="space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Cari anggota / keterangan / bukti</span>
+          <input id="history-search" type="search" placeholder="Nama, catatan, nomor bukti..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+        <label class="space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Dari tanggal</span>
+          <input id="history-date-from" type="date" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+        <label class="space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Sampai tanggal</span>
+          <input id="history-date-to" type="date" class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+      </div>
+      <div id="bendahara-history-report" class="overflow-x-auto">
+        <table class="w-full text-xs text-left text-slate-600">
+          <thead class="bg-slate-50 text-slate-500 uppercase border-b border-slate-200">
+            <tr>
+              <th class="p-3" aria-sort="descending">
+                <button type="button" data-history-sort="date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Tanggal <span data-history-sort-indicator aria-hidden="true">↓</span>
+                </button>
+              </th>
+              <th class="p-3">No. Bukti</th>
+              <th class="p-3" aria-sort="none">
+                <button type="button" data-history-sort="member" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Nama Krama <span data-history-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3">Keterangan</th>
+              <th class="p-3 text-center" aria-sort="none">
+                <button type="button" data-history-sort="member-status" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Status Krama <span data-history-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="print-hide p-3 text-center">Bukti</th>
+              <th class="p-3 text-right" aria-sort="none">
+                <button type="button" data-history-sort="debit" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Debet <span data-history-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3 text-right" aria-sort="none">
+                <button type="button" data-history-sort="credit" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Kredit <span data-history-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3 text-right" aria-sort="none">
+                <button type="button" data-history-sort="balance" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Saldo <span data-history-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+              <th class="p-3 text-center" aria-sort="none">
+                <button type="button" data-history-sort="status" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                  Status Pembayaran <span data-history-sort-indicator aria-hidden="true">↕</span>
+                </button>
+              </th>
+            </tr>
+          </thead>
+          <tbody id="bendahara-history-rows" class="divide-y divide-slate-100">
+            {riwayatDenganNama.length > 0 ? (
+              riwayatDenganNama.map((item) => (
+                <tr
+                  class="bendahara-history-row hover:bg-slate-50"
+                  data-date={item.tanggalSort}
+                  data-member={item.namaAnggota}
+                  data-member-status={item.statusKrama}
+                  data-status={item.status_bayar || 'BELUM_LUNAS'}
+                  data-debit={item.debit}
+                  data-credit={item.kredit}
+                  data-balance={item.saldoBerjalan}
+                  data-edit-type={item.tipe === 'TAGIHAN' ? 'tagihan' : item.tipe === 'PEMBAYARAN' ? 'pembayaran' : ''}
+                  data-edit-id={item.tipe === 'TAGIHAN' ? item.billId : item.paymentId}
+                  data-edit-date={item.tanggalSort || ''}
+                  data-edit-amount={item.tipe === 'TAGIHAN' ? item.debit : item.kredit}
+                  data-edit-description={item.keteranganRiwayat || ''}
+                  data-setoran-id={item.tipe === 'PEMBAYARAN' ? item.setoran_regu_id || '' : ''}
+                  data-search={`${item.namaAnggota} ${item.keteranganRiwayat} ${item.noBukti} ${item.tipe}`.toLocaleLowerCase('id-ID')}
+                >
+                  <td class="p-3 whitespace-nowrap">{item.tanggalSort || '-'}</td>
+                  <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold text-slate-600">
+                    {item.tipe === 'TAGIHAN' || item.tipe === 'PEMBAYARAN' ? (
+                      <button type="button" data-open-transaction-edit class="text-blue-700 underline decoration-dotted underline-offset-2 hover:text-blue-900 focus-visible:outline-2 focus-visible:outline-blue-600" title="Klik untuk mengedit transaksi">
+                        {item.noBukti}
+                      </button>
+                    ) : item.noBukti}
+                  </td>
+                  <td class="whitespace-nowrap p-3 font-semibold text-slate-900">
+                    {item.namaAnggota}
+                  </td>
+                  <td class="min-w-64 p-3">
+                    <span class={`mr-2 inline-block rounded-full px-2 py-0.5 text-[9px] font-bold ${
+                      item.tipe === 'TAGIHAN' ? 'bg-blue-100 text-blue-800' : item.tipe === 'PEMBAYARAN' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'
+                    }`}>
+                      {item.tipe === 'TAGIHAN' ? 'Tagihan' : item.tipe === 'PEMBAYARAN' ? 'Pembayaran' : 'Rekonsiliasi'}
+                    </span>
+                    <span class="whitespace-pre-wrap font-medium text-slate-700">{item.keteranganRiwayat}</span>
+                  </td>
+                  <td class="p-3 text-center">
+                    <span class={`inline-block rounded-full px-2.5 py-1 text-[10px] font-bold ${
+                      item.statusKrama === 'TIDAK_AKTIF' ? 'bg-slate-200 text-slate-700' : item.statusKrama === 'BELUM_DILENGKAPI' ? 'bg-slate-100 text-slate-500' : 'bg-emerald-100 text-emerald-800'
+                    }`}>
+                      {labelStatusKeanggotaan(item.statusKrama)}
+                    </span>
+                  </td>
+                  <td class="print-hide p-3 text-center">
+                    {item.tipe === 'PEMBAYARAN' ? (
+                      <PrintReportButton targetId={`bukti-bayar-${item.paymentId}`} title="Bukti Pembayaran Krama" label="Bukti" />
+                    ) : <span class="text-slate-400">-</span>}
+                    {item.tipe === 'PEMBAYARAN' && (
+                      <section id={`bukti-bayar-${item.paymentId}`} class="hidden space-y-4 border border-slate-300 bg-white p-6 text-slate-900">
+                        <div class="border-b border-slate-300 pb-4 text-center">
+                          <h2 class="text-lg font-black">BUKTI PEMBAYARAN KRAMA</h2>
+                          <p class="mt-1 text-xs">Banjar Adat Dharma Sadhu Dukuh</p>
+                        </div>
+                        <dl class="grid grid-cols-2 gap-3 text-sm">
+                          <dt class="font-semibold">Nama Krama</dt><dd>{item.namaAnggota}</dd>
+                          <dt class="font-semibold">Tanggal Pembayaran</dt><dd>{item.tanggalSort || '-'}</dd>
+                          <dt class="font-semibold">Metode</dt><dd>{item.metode_pembayaran || 'CASH_BENDAHARA'}</dd>
+                          <dt class="font-semibold">Nominal Diterima</dt><dd class="font-bold">{formatRupiah(item.kredit)}</dd>
+                          <dt class="font-semibold">Keterangan / Bukti</dt><dd>{item.keteranganRiwayat}</dd>
+                        </dl>
+                        <div class="grid grid-cols-2 gap-12 pt-10 text-center text-xs">
+                          <div class="border-t border-slate-400 pt-2">Krama / Pembayar</div>
+                          <div class="border-t border-slate-400 pt-2">Bendahara Penerima</div>
+                        </div>
+                      </section>
+                    )}
+                  </td>
+                  <td class="whitespace-nowrap p-3 text-right font-semibold text-slate-900">{item.debit > 0 ? formatRupiah(item.debit) : '-'}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-semibold text-emerald-800">{item.kredit > 0 ? formatRupiah(item.kredit) : '-'}</td>
+                  <td class={`whitespace-nowrap p-3 text-right font-bold ${item.saldoBerjalan > 0 ? 'text-amber-900' : 'text-slate-700'}`}>{formatRupiah(item.saldoBerjalan)}</td>
+                  <td class="p-3 text-center">
+                    <span class={`px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                      item.status_bayar === 'LUNAS' ? 'bg-emerald-100 text-emerald-800' : item.status_bayar === 'REKONSILIASI' ? 'bg-amber-100 text-amber-900' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {item.status_bayar || 'BELUM_LUNAS'}
+                    </span>
+                  </td>
+                  <td class="print-hide p-3 text-center">
+                    {item.tipe === 'PEMBAYARAN' ? (
+                      <>
+                        <PrintReportButton targetId={`bukti-bayar-${item.paymentId}`} title="Bukti Pembayaran Krama" label="Bukti" />
+                        <section id={`bukti-bayar-${item.paymentId}`} class="hidden space-y-4 border border-slate-300 bg-white p-6 text-slate-900">
+                          <div class="border-b border-slate-300 pb-4 text-center">
+                            <h2 class="text-lg font-black">BUKTI PEMBAYARAN KRAMA</h2>
+                            <p class="mt-1 text-xs">Banjar Adat Dharma Sadhu Dukuh</p>
+                          </div>
+                          <dl class="grid grid-cols-2 gap-3 text-sm">
+                            <dt class="font-semibold">Nama Krama</dt><dd>{item.namaAnggota}</dd>
+                            <dt class="font-semibold">Tanggal Pembayaran</dt><dd>{item.tanggalSort || '-'}</dd>
+                            <dt class="font-semibold">Metode</dt><dd>{item.metode_pembayaran || 'CASH_BENDAHARA'}</dd>
+                            <dt class="font-semibold">Nominal Diterima</dt><dd class="font-bold">{formatRupiah(item.nominalRiwayat)}</dd>
+                            <dt class="font-semibold">Keterangan / Bukti</dt><dd>{item.keteranganRiwayat}</dd>
+                          </dl>
+                          <div class="grid grid-cols-2 gap-12 pt-10 text-center text-xs">
+                            <div class="border-t border-slate-400 pt-2">Krama / Pembayar</div>
+                            <div class="border-t border-slate-400 pt-2">Bendahara Penerima</div>
+                          </div>
+                        </section>
+                      </>
+                    ) : <span class="text-slate-400">-</span>}
+                  </td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colspan="10" class="p-6 text-center text-slate-400 italic">Belum ada riwayat transaksi tercatat. Gunakan form input denda/cicilan di atas untuk mencatat transaksi.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <div class="flex flex-wrap items-center gap-3">
+            <label for="history-page-size" class="text-xs font-semibold text-slate-600">Baris per halaman</label>
+            <select id="history-page-size" class="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs text-slate-700 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100">
+              <option value="10" selected>10</option>
+              <option value="20">20</option>
+              <option value="50">50</option>
+            </select>
+            <p id="history-page-summary" class="text-xs text-slate-500" aria-live="polite"></p>
+          </div>
+          <div class="flex items-center justify-between gap-3 sm:justify-end">
+            <button id="history-page-previous" type="button" class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">&larr; Sebelumnya</button>
+            <nav id="history-page-links" class="flex flex-wrap items-center justify-center gap-1" aria-label="Navigasi halaman riwayat transaksi" aria-live="polite"></nav>
+            <button id="history-page-next" type="button" class="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">Berikutnya &rarr;</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <dialog id="dialog-edit-transaksi" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="space-y-5 bg-white p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p id="edit-transaksi-type" class="text-xs font-bold uppercase text-blue-700">Edit Transaksi</p>
+            <h2 id="edit-transaksi-title" class="mt-1 text-lg font-black text-slate-900">Perbarui catatan buku besar</h2>
+            <p id="edit-transaksi-member" class="mt-1 text-xs text-slate-500"></p>
+          </div>
+          <button type="button" data-close-dialog="dialog-edit-transaksi" aria-label="Tutup form edit transaksi" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+        <form id="edit-transaksi-form" method="POST" class="space-y-4" onsubmit="return confirm('Simpan perubahan transaksi? Saldo buku besar akan dihitung ulang.');">
+          <input id="edit-transaksi-action" type="hidden" name="action" value="edit_tagihan" />
+          <input id="edit-transaksi-id" type="hidden" name="tagihan_id" />
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Tanggal transaksi</span>
+            <input id="edit-transaksi-date" type="date" name="tanggal" required class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+          </label>
+          <label class="block space-y-1">
+            <span id="edit-transaksi-amount-label" class="text-[11px] font-bold uppercase text-slate-600">Nominal tagihan (Rp)</span>
+            <input id="edit-transaksi-amount" type="number" name="nominal" min="1" step="1" required class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100" />
+          </label>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Keterangan</span>
+            <textarea id="edit-transaksi-description" name="keterangan" rows="3" required maxlength="1000" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-800 focus:border-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-100"></textarea>
+          </label>
+          <p id="edit-transaksi-note" class="hidden rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"></p>
+          <div class="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" data-close-dialog="dialog-edit-transaksi" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Batal</button>
+            <button type="submit" class="rounded-lg bg-blue-700 px-4 py-2 text-xs font-bold text-white hover:bg-blue-800">Simpan Perubahan</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
+  </div>
+</LayoutDashboard>
+
+<script>
+  document.querySelectorAll<HTMLButtonElement>('[data-open-dialog]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const dialog = document.getElementById(button.dataset.openDialog || '');
+      if (dialog instanceof HTMLDialogElement && !dialog.open) dialog.showModal();
+    });
+  });
+
+  document.querySelectorAll<HTMLButtonElement>('[data-close-dialog]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const dialog = document.getElementById(button.dataset.closeDialog || '');
+      if (dialog instanceof HTMLDialogElement && dialog.open) dialog.close();
+    });
+  });
+
+  document.querySelectorAll<HTMLDialogElement>('dialog').forEach((dialog) => {
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) dialog.close();
+    });
+  });
+
+  const editTransactionDialog = document.querySelector<HTMLDialogElement>('#dialog-edit-transaksi');
+  const editTransactionForm = document.querySelector<HTMLFormElement>('#edit-transaksi-form');
+  const editTransactionType = document.querySelector<HTMLElement>('#edit-transaksi-type');
+  const editTransactionTitle = document.querySelector<HTMLElement>('#edit-transaksi-title');
+  const editTransactionMember = document.querySelector<HTMLElement>('#edit-transaksi-member');
+  const editTransactionAction = document.querySelector<HTMLInputElement>('#edit-transaksi-action');
+  const editTransactionId = document.querySelector<HTMLInputElement>('#edit-transaksi-id');
+  const editTransactionDate = document.querySelector<HTMLInputElement>('#edit-transaksi-date');
+  const editTransactionAmount = document.querySelector<HTMLInputElement>('#edit-transaksi-amount');
+  const editTransactionAmountLabel = document.querySelector<HTMLElement>('#edit-transaksi-amount-label');
+  const editTransactionDescription = document.querySelector<HTMLTextAreaElement>('#edit-transaksi-description');
+  const editTransactionNote = document.querySelector<HTMLElement>('#edit-transaksi-note');
+
+  document.querySelectorAll<HTMLButtonElement>('[data-open-transaction-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const row = button.closest<HTMLTableRowElement>('.bendahara-history-row');
+      if (!row || !editTransactionDialog || !editTransactionForm) return;
+      const type = row.dataset.editType;
+      if (type !== 'tagihan' && type !== 'pembayaran') return;
+
+      const transactionId = row.dataset.editId || '';
+      const memberName = row.dataset.member || 'Anggota';
+      const isPayment = type === 'pembayaran';
+      editTransactionForm.reset();
+      if (editTransactionAction) editTransactionAction.value = isPayment ? 'edit_pembayaran' : 'edit_tagihan';
+      if (editTransactionId) {
+        editTransactionId.name = isPayment ? 'payment_id' : 'tagihan_id';
+        editTransactionId.value = transactionId;
+      }
+      if (editTransactionDate) editTransactionDate.value = row.dataset.editDate || '';
+      if (editTransactionAmount) editTransactionAmount.value = row.dataset.editAmount || '0';
+      if (editTransactionDescription) editTransactionDescription.value = row.dataset.editDescription || '';
+      if (editTransactionType) editTransactionType.textContent = isPayment ? 'Pembayaran Krama' : 'Tagihan Kewajiban';
+      if (editTransactionTitle) editTransactionTitle.textContent = isPayment ? 'Edit Pembayaran' : 'Edit Tagihan';
+      if (editTransactionMember) editTransactionMember.textContent = `${memberName} · ${row.querySelector('td')?.textContent?.trim() || ''} · ${button.textContent?.trim() || ''}`;
+      if (editTransactionAmountLabel) editTransactionAmountLabel.textContent = isPayment ? 'Nominal pembayaran (Rp)' : 'Nominal tagihan (Rp)';
+      if (editTransactionNote) {
+        const depositId = row.dataset.setoranId;
+        const isSetoranLinked = Boolean(depositId);
+        editTransactionNote.textContent = isPayment && isSetoranLinked
+          ? 'Pembayaran ini tertaut ke setoran. Tolak setoran PENDING atau balikkan setoran VERIFIED terlebih dahulu.'
+          : isPayment
+            ? 'Menyimpan perubahan akan menghitung ulang jumlah dibayar dan status tagihan terkait.'
+            : 'Jika tagihan terkait pembayaran yang tertaut setoran, perubahan akan ditolak sampai setoran dilepas.';
+        editTransactionNote.classList.remove('hidden');
+      }
+      if (isPayment && row.dataset.setoranId) {
+        const submitButton = editTransactionForm.querySelector<HTMLButtonElement>('button[type="submit"]');
+        if (submitButton) submitButton.disabled = true;
+      } else {
+        const submitButton = editTransactionForm.querySelector<HTMLButtonElement>('button[type="submit"]');
+        if (submitButton) submitButton.disabled = false;
+      }
+      editTransactionDialog.showModal();
+    });
+  });
+
+  document.querySelectorAll<HTMLElement>('[data-table-pagination]').forEach((controls) => {
+    const tableBody = document.getElementById(controls.dataset.tablePagination || '') as HTMLTableSectionElement | null;
+    const pageSizeSelect = controls.querySelector<HTMLSelectElement>('[data-page-size]');
+    const summary = controls.querySelector<HTMLElement>('[data-page-summary]');
+    const pageLinks = controls.querySelector<HTMLElement>('[data-page-links]');
+    const previousButton = controls.querySelector<HTMLButtonElement>('[data-page-previous]');
+    const nextButton = controls.querySelector<HTMLButtonElement>('[data-page-next]');
+    let page = 1;
+
+    const renderPagination = () => {
+      if (!tableBody || !pageSizeSelect || !pageLinks) return;
+      const rows = Array.from(tableBody.querySelectorAll<HTMLTableRowElement>('.page-row'));
+      const pageSize = Number(pageSizeSelect.value || 10);
+      const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+      page = Math.min(Math.max(1, page), pageCount);
+      const start = (page - 1) * pageSize;
+      const end = Math.min(start + pageSize, rows.length);
+
+      rows.forEach((row, index) => row.classList.toggle('hidden', index < start || index >= end));
+      if (summary) summary.textContent = rows.length ? `Menampilkan ${start + 1}-${end} dari ${rows.length} baris` : 'Tidak ada data';
+      if (previousButton) previousButton.disabled = page <= 1;
+      if (nextButton) nextButton.disabled = page >= pageCount;
+
+      let pages: Array<number | 'ellipsis'>;
+      if (pageCount <= 7) pages = Array.from({ length: pageCount }, (_, index) => index + 1);
+      else if (page <= 4) pages = [1, 2, 3, 4, 5, 'ellipsis', pageCount];
+      else if (page >= pageCount - 3) pages = [1, 'ellipsis', pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+      else pages = [1, 'ellipsis', page - 1, page, page + 1, 'ellipsis', pageCount];
+
+      pageLinks.replaceChildren();
+      pages.forEach((pageNumber) => {
+        if (pageNumber === 'ellipsis') {
+          const dots = document.createElement('span');
+          dots.className = 'px-1 text-xs text-slate-400';
+          dots.textContent = '…';
+          pageLinks.append(dots);
+          return;
+        }
+
+        const link = document.createElement('a');
+        link.href = '#';
+        link.textContent = String(pageNumber);
+        link.setAttribute('aria-label', `Halaman ${pageNumber}`);
+        link.className = pageNumber === page
+          ? 'rounded-md bg-blue-700 px-2.5 py-1 text-xs font-bold text-white'
+          : 'rounded-md px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 hover:underline';
+        if (pageNumber === page) link.setAttribute('aria-current', 'page');
+        link.addEventListener('click', (event) => {
+          event.preventDefault();
+          page = pageNumber;
+          renderPagination();
+        });
+        pageLinks.append(link);
+      });
+    };
+
+    pageSizeSelect?.addEventListener('change', () => {
+      page = 1;
+      renderPagination();
+    });
+    previousButton?.addEventListener('click', () => {
+      page -= 1;
+      renderPagination();
+    });
+    nextButton?.addEventListener('click', () => {
+      page += 1;
+      renderPagination();
+    });
+    renderPagination();
+  });
+
+  const numbasTagihanSelect = document.querySelector<HTMLSelectElement>('#numbas-tagihan');
+  const numbasNominalInput = document.querySelector<HTMLInputElement>('#numbas-nominal');
+  const numbasSisaText = document.querySelector<HTMLElement>('#numbas-sisa');
+
+  numbasTagihanSelect?.addEventListener('change', () => {
+    const selectedOption = numbasTagihanSelect.selectedOptions[0];
+    const remaining = Number(selectedOption?.dataset.sisa || 0);
+    if (numbasNominalInput) {
+      numbasNominalInput.max = String(remaining);
+      numbasNominalInput.value = remaining > 0 ? String(remaining) : '';
+    }
+    if (numbasSisaText) {
+      numbasSisaText.textContent = remaining > 0
+        ? `Sisa kewajiban: ${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(remaining)}`
+        : 'Pilih tagihan tahunan yang masih memiliki sisa.';
+    }
+  });
+
+  const jenisEventSelect = document.querySelector<HTMLSelectElement>('#jenis-event');
+  const targetStatusSelect = document.querySelector<HTMLSelectElement>('#target-status-keanggotaan');
+  const targetStatusNote = document.querySelector<HTMLElement>('#target-status-note');
+  const passiveOption = targetStatusSelect?.querySelector<HTMLOptionElement>('option[value="TIDAK_AKTIF"]');
+
+  const saldoAwalAnggotaSearch = document.querySelector<HTMLInputElement>('#saldo-awal-anggota-search');
+  const saldoAwalAnggotaId = document.querySelector<HTMLInputElement>('#saldo-awal-anggota-id');
+  const saldoAwalAnggotaOptions = document.querySelector<HTMLUListElement>('#saldo-awal-anggota-options');
+  const saldoAwalAnggotaSelected = document.querySelector<HTMLElement>('#saldo-awal-anggota-selected');
+  const saldoAwalAnggotaEmpty = document.querySelector<HTMLElement>('#saldo-awal-anggota-empty');
+  const saldoAwalAnggotaRows = Array.from(document.querySelectorAll<HTMLElement>('.saldo-awal-anggota-option'));
+  const saldoAwalForm = saldoAwalAnggotaSearch?.closest('form');
+
+  const hideSaldoAwalSuggestions = () => saldoAwalAnggotaOptions?.classList.add('hidden');
+
+  saldoAwalAnggotaSearch?.addEventListener('input', () => {
+    if (saldoAwalAnggotaId) saldoAwalAnggotaId.value = '';
+    saldoAwalAnggotaSelected?.classList.add('hidden');
+    saldoAwalAnggotaSearch.setCustomValidity('');
+
+    const query = saldoAwalAnggotaSearch.value.trim().toLocaleLowerCase('id-ID');
+    let matchCount = 0;
+    saldoAwalAnggotaRows.forEach((option) => {
+      const searchable = `${option.dataset.name || ''} ${option.dataset.phone || ''} ${option.dataset.regu || ''} ${option.dataset.tempekan || ''}`.toLocaleLowerCase('id-ID');
+      const matches = query.length > 0 && searchable.includes(query);
+      option.classList.toggle('hidden', !matches);
+      option.setAttribute('aria-selected', 'false');
+      if (matches) matchCount += 1;
+    });
+
+    saldoAwalAnggotaEmpty?.classList.toggle('hidden', matchCount > 0 || query.length === 0);
+    saldoAwalAnggotaOptions?.classList.toggle('hidden', query.length === 0);
+  });
+
+  saldoAwalAnggotaRows.forEach((option) => {
+    const selectSaldoAwalMember = () => {
+      const id = option.dataset.id || '';
+      const name = option.dataset.name || 'Anggota';
+      const phone = option.dataset.phone || 'Tanpa nomor HP';
+      const regu = option.dataset.regu || '-';
+      const tempekan = option.dataset.tempekan || 'Tanpa tempekan';
+      if (saldoAwalAnggotaId) saldoAwalAnggotaId.value = id;
+      if (saldoAwalAnggotaSearch) {
+        saldoAwalAnggotaSearch.value = name;
+        saldoAwalAnggotaSearch.setCustomValidity('');
+      }
+      saldoAwalAnggotaRows.forEach((row) => row.setAttribute('aria-selected', String(row === option)));
+      if (saldoAwalAnggotaSelected) {
+        saldoAwalAnggotaSelected.textContent = `${name} · ${phone} · Regu ${regu} · ${tempekan}`;
+        saldoAwalAnggotaSelected.classList.remove('hidden');
+      }
+      hideSaldoAwalSuggestions();
+    };
+
+    option.addEventListener('click', selectSaldoAwalMember);
+    option.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectSaldoAwalMember();
+      }
+    });
+  });
+
+  saldoAwalForm?.addEventListener('submit', (event) => {
+    if (!saldoAwalAnggotaId?.value) {
+      event.preventDefault();
+      saldoAwalAnggotaSearch?.focus();
+      saldoAwalAnggotaSearch?.setCustomValidity('Cari lalu pilih anggota dari daftar hasil.');
+      saldoAwalAnggotaSearch?.reportValidity();
+    } else {
+      saldoAwalAnggotaSearch?.setCustomValidity('');
+    }
+  });
+
+  document.addEventListener('click', (event) => {
+    if (event.target instanceof Node && !saldoAwalAnggotaOptions?.contains(event.target) && event.target !== saldoAwalAnggotaSearch) {
+      hideSaldoAwalSuggestions();
+    }
+  });
+
+  const updateEventAudienceOptions = () => {
+    if (!jenisEventSelect || !targetStatusSelect || !passiveOption) return;
+    const isAnnualFee = jenisEventSelect.value === 'TAHUNAN';
+    passiveOption.disabled = !isAnnualFee;
+    if (isAnnualFee) {
+      targetStatusSelect.value = 'TIDAK_AKTIF';
+      targetStatusNote && (targetStatusNote.textContent = 'Iuran tahunan hanya dikenakan kepada Numbas Ayahan.');
+    } else {
+      if (targetStatusSelect.value === 'TIDAK_AKTIF') targetStatusSelect.value = 'SEMUA';
+      targetStatusNote && (targetStatusNote.textContent = 'Pilih Ngayah saja atau seluruh anggota Ngayah dan Numbas Ayahan.');
+    }
+  };
+
+  jenisEventSelect?.addEventListener('change', updateEventAudienceOptions);
+  updateEventAudienceOptions();
+
+  const historyRowsContainer = document.querySelector<HTMLTableSectionElement>('#bendahara-history-rows');
+  const historySortButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-history-sort]'));
+  const historyPageSize = document.querySelector<HTMLSelectElement>('#history-page-size');
+  const historyPageSummary = document.querySelector<HTMLElement>('#history-page-summary');
+  const historyPageLinks = document.querySelector<HTMLElement>('#history-page-links');
+  const historyPagePrevious = document.querySelector<HTMLButtonElement>('#history-page-previous');
+  const historyPageNext = document.querySelector<HTMLButtonElement>('#history-page-next');
+  const historySearch = document.querySelector<HTMLInputElement>('#history-search');
+  const historyDateFrom = document.querySelector<HTMLInputElement>('#history-date-from');
+  const historyDateTo = document.querySelector<HTMLInputElement>('#history-date-to');
+  let currentHistoryPage = 1;
+  let activeHistorySort = 'date';
+  let activeHistoryDirection: 'asc' | 'desc' = 'desc';
+
+  const updateHistoryPagination = () => {
+    if (!historyRowsContainer) return;
+    const allRows = Array.from(historyRowsContainer.querySelectorAll<HTMLTableRowElement>('.bendahara-history-row'));
+    const rows = allRows.filter((row) => row.dataset.filterHidden !== 'true');
+    const pageSize = Number(historyPageSize?.value || 10);
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    currentHistoryPage = Math.min(Math.max(1, currentHistoryPage), totalPages);
+    const startIndex = (currentHistoryPage - 1) * pageSize;
+    const endIndex = Math.min(startIndex + pageSize, rows.length);
+
+    allRows.forEach((row) => {
+      const index = rows.indexOf(row);
+      row.classList.toggle('hidden', index < 0 || index < startIndex || index >= endIndex);
+    });
+
+    if (historyPageSummary) {
+      historyPageSummary.textContent = rows.length
+        ? `Menampilkan ${startIndex + 1}-${endIndex} dari ${rows.length} baris cocok`
+        : 'Tidak ada baris yang cocok';
+    }
+    if (historyPagePrevious) historyPagePrevious.disabled = currentHistoryPage <= 1;
+    if (historyPageNext) historyPageNext.disabled = currentHistoryPage >= totalPages;
+
+    if (historyPageLinks) {
+      historyPageLinks.replaceChildren();
+      let visiblePages: Array<number | 'ellipsis'>;
+      if (totalPages <= 7) {
+        visiblePages = Array.from({ length: totalPages }, (_, index) => index + 1);
+      } else if (currentHistoryPage <= 4) {
+        visiblePages = [1, 2, 3, 4, 5, 'ellipsis', totalPages];
+      } else if (currentHistoryPage >= totalPages - 3) {
+        visiblePages = [1, 'ellipsis', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+      } else {
+        visiblePages = [1, 'ellipsis', currentHistoryPage - 1, currentHistoryPage, currentHistoryPage + 1, 'ellipsis', totalPages];
+      }
+
+      visiblePages.forEach((page) => {
+        if (page === 'ellipsis') {
+          const ellipsis = document.createElement('span');
+          ellipsis.className = 'px-1 text-xs text-slate-400';
+          ellipsis.textContent = '…';
+          historyPageLinks.append(ellipsis);
+          return;
+        }
+
+        const pageLink = document.createElement('a');
+        pageLink.href = '#bendahara-history-report';
+        pageLink.textContent = String(page);
+        pageLink.setAttribute('aria-label', `Halaman ${page}`);
+        pageLink.className = page === currentHistoryPage
+          ? 'rounded-md bg-blue-700 px-2.5 py-1 text-xs font-bold text-white'
+          : 'rounded-md px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 hover:underline';
+        if (page === currentHistoryPage) pageLink.setAttribute('aria-current', 'page');
+        pageLink.addEventListener('click', (event) => {
+          event.preventDefault();
+          currentHistoryPage = page;
+          updateHistoryPagination();
+        });
+        historyPageLinks.append(pageLink);
+      });
+    }
+  };
+
+  const applyHistoryFilters = () => {
+    if (!historyRowsContainer) return;
+    const query = historySearch?.value.trim().toLocaleLowerCase('id-ID') || '';
+    const dateFrom = historyDateFrom?.value || '';
+    const dateTo = historyDateTo?.value || '';
+
+    historyRowsContainer.querySelectorAll<HTMLTableRowElement>('.bendahara-history-row').forEach((row) => {
+      const date = row.dataset.date || '';
+      const matchesQuery = !query || (row.dataset.search || '').includes(query);
+      const matchesFrom = !dateFrom || (date && date >= dateFrom);
+      const matchesTo = !dateTo || (date && date <= dateTo);
+      row.dataset.filterHidden = String(!(matchesQuery && matchesFrom && matchesTo));
+    });
+
+    currentHistoryPage = 1;
+    updateHistoryPagination();
+  };
+
+  const sortHistory = (field: string, direction: 'asc' | 'desc') => {
+    if (!historyRowsContainer) return;
+    activeHistorySort = field;
+    activeHistoryDirection = direction;
+    currentHistoryPage = 1;
+    const rows = Array.from(historyRowsContainer.querySelectorAll<HTMLTableRowElement>('.bendahara-history-row'));
+    rows.sort((left, right) => {
+      const dataField = field === 'member-status' ? 'memberStatus' : field;
+      const leftValue = left.dataset[dataField] || '';
+      const rightValue = right.dataset[dataField] || '';
+      const isNumeric = ['debit', 'credit', 'balance'].includes(field);
+      const comparison = isNumeric
+        ? Number(leftValue) - Number(rightValue)
+        : field === 'date'
+          ? leftValue.localeCompare(rightValue)
+          : leftValue.localeCompare(rightValue, 'id', { sensitivity: 'base', numeric: true });
+      return direction === 'asc' ? comparison : -comparison;
+    });
+    rows.forEach((row) => historyRowsContainer.append(row));
+
+    historySortButtons.forEach((button) => {
+      const selected = button.dataset.historySort === field;
+      const header = button.closest('th');
+      if (header) header.setAttribute('aria-sort', selected ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      const indicator = button.querySelector<HTMLElement>('[data-history-sort-indicator]');
+      if (indicator) indicator.textContent = selected ? (direction === 'asc' ? '↑' : '↓') : '↕';
+    });
+    updateHistoryPagination();
+  };
+
+  historySortButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      const field = button.dataset.historySort;
+      if (!field) return;
+      const direction = activeHistorySort === field && activeHistoryDirection === 'asc' ? 'desc' : 'asc';
+      sortHistory(field, direction);
+    });
+  });
+  sortHistory(activeHistorySort, activeHistoryDirection);
+
+  historySearch?.addEventListener('input', applyHistoryFilters);
+  historyDateFrom?.addEventListener('change', applyHistoryFilters);
+  historyDateTo?.addEventListener('change', applyHistoryFilters);
+  applyHistoryFilters();
+
+  historyPageSize?.addEventListener('change', () => {
+    currentHistoryPage = 1;
+    updateHistoryPagination();
+  });
+  historyPagePrevious?.addEventListener('click', () => {
+    currentHistoryPage -= 1;
+    updateHistoryPagination();
+  });
+  historyPageNext?.addEventListener('click', () => {
+    currentHistoryPage += 1;
+    updateHistoryPagination();
+  });
+
+  const anggotaSearch = document.querySelector<HTMLInputElement>('#anggota-search');
+  const anggotaId = document.querySelector<HTMLInputElement>('#anggota_id');
+  const anggotaSuggestions = document.querySelector<HTMLUListElement>('#anggota-suggestions');
+  const anggotaSelected = document.querySelector<HTMLElement>('#anggota-selected');
+  const anggotaOptions = Array.from(document.querySelectorAll<HTMLElement>('.anggota-option'));
+  const anggotaEmpty = document.querySelector<HTMLElement>('#anggota-empty');
+  const dendaForm = anggotaSearch?.closest('form');
+
+  const hideAnggotaSuggestions = () => anggotaSuggestions?.classList.add('hidden');
+
+  anggotaSearch?.addEventListener('input', () => {
+    if (anggotaId) anggotaId.value = '';
+    anggotaSelected?.classList.add('hidden');
+
+    const query = anggotaSearch.value.trim().toLocaleLowerCase('id-ID');
+    let matchCount = 0;
+    anggotaOptions.forEach((option) => {
+      const searchable = `${option.dataset.name || ''} ${option.dataset.phone || ''} ${option.dataset.regu || ''}`.toLocaleLowerCase('id-ID');
+      const matches = query.length > 0 && searchable.includes(query);
+      option.classList.toggle('hidden', !matches);
+      if (matches) matchCount += 1;
+    });
+
+    anggotaEmpty?.classList.toggle('hidden', matchCount > 0 || query.length === 0);
+    anggotaSuggestions?.classList.toggle('hidden', query.length === 0);
+  });
+
+  anggotaOptions.forEach((option) => {
+    option.addEventListener('click', () => {
+      const id = option.dataset.id || '';
+      const name = option.dataset.name || 'Anggota';
+      const phone = option.dataset.phone || 'Tanpa nomor HP';
+      const regu = option.dataset.regu || '-';
+      if (anggotaId) anggotaId.value = id;
+      if (anggotaSearch) anggotaSearch.value = name;
+      if (anggotaSelected) {
+        anggotaSelected.textContent = `${name} · ${phone} · Regu ${regu}`;
+        anggotaSelected.classList.remove('hidden');
+      }
+      hideAnggotaSuggestions();
+    });
+  });
+
+  dendaForm?.addEventListener('submit', (event) => {
+    if (!anggotaId?.value) {
+      event.preventDefault();
+      anggotaSearch?.focus();
+      anggotaSearch?.setCustomValidity('Cari lalu pilih anggota dari daftar saran.');
+      anggotaSearch?.reportValidity();
+    } else {
+      anggotaSearch?.setCustomValidity('');
+      dendaForm.querySelectorAll<HTMLButtonElement>('button[type="submit"]').forEach((button) => {
+        button.disabled = true;
+      });
+    }
+  });
+
+  document.addEventListener('click', (event) => {
+    if (event.target instanceof Node && !anggotaSuggestions?.contains(event.target) && event.target !== anggotaSearch) {
+      hideAnggotaSuggestions();
+    }
+  });
+</script>

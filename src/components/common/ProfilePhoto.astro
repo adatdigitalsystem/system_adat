@@ -1,0 +1,39 @@
+---
+interface Props {
+  src?: string | null;
+  alt: string;
+  className: string;
+  imageClass: string;
+  fallbackClass: string;
+  fallbackText?: string;
+  loading?: 'eager' | 'lazy';
+}
+
+const {
+  src,
+  alt,
+  className,
+  imageClass,
+  fallbackClass,
+  fallbackText = alt.trim().charAt(0).toLocaleUpperCase('id-ID') || '?',
+  loading = 'lazy',
+} = Astro.props;
+const hasPhoto = Boolean(src?.trim());
+---
+
+<div class={className}>
+  {hasPhoto && <img data-profile-photo src={src || ''} alt={alt} loading={loading} class={imageClass} />}
+  <div data-profile-photo-fallback class:list={[fallbackClass, { hidden: hasPhoto }]} aria-label={`Foto ${alt} tidak tersedia`}>
+    {fallbackText}
+  </div>
+</div>
+
+<script>
+  document.addEventListener('error', (event) => {
+    const image = event.target;
+    if (!(image instanceof HTMLImageElement) || !image.hasAttribute('data-profile-photo')) return;
+
+    image.classList.add('hidden');
+    image.parentElement?.querySelector<HTMLElement>('[data-profile-photo-fallback]')?.classList.remove('hidden');
+  }, true);
+</script>

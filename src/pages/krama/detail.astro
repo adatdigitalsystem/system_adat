@@ -1,0 +1,215 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { getGoogleDriveImageUrl } from '../../lib/googleDrivePublic';
+import { labelStatusKeanggotaan } from '../../lib/utils';
+import PrintReportButton from '../../components/common/PrintReportButton.astro';
+import ProfilePhoto from '../../components/common/ProfilePhoto.astro';
+
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+if (!accessToken) return Astro.redirect('/login');
+
+const { data: { user } } = await supabase.auth.getUser(accessToken);
+if (!user) return Astro.redirect('/login');
+
+const memberId = Astro.url.searchParams.get('id');
+if (!memberId) return Astro.redirect('/krama/dashboard');
+
+const { data: viewer } = await supabase
+  .from('anggota')
+  .select('id, role, no_regu')
+  .eq('user_id', user.id)
+  .maybeSingle();
+
+if (!viewer) return Astro.redirect('/login');
+
+const viewerRole = (viewer.role || 'KRAMA').toUpperCase().replace(/[\\s_-]/g, '');
+const isAdmin = viewerRole === 'ADMIN';
+const isStaff = ['ADMIN', 'PENGURUS', 'BENDAHARA'].includes(viewerRole);
+const isKepalaRegu = ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes(viewerRole);
+
+const { data: anggota, error } = await supabase
+  .from('anggota')
+  .select('*')
+  .eq('id', memberId)
+  .maybeSingle();
+
+if (error || !anggota) return Astro.redirect('/krama/dashboard');
+
+const mayView = isStaff
+  || (isKepalaRegu && anggota.no_regu === viewer.no_regu)
+  || (!isKepalaRegu && !isStaff && anggota.id === viewer.id);
+
+if (!mayView) return Astro.redirect('/krama/dashboard');
+
+const returnPath = isKepalaRegu
+  ? '/kepalaregu'
+  : isAdmin
+    ? '/admin/dashboard'
+    : viewerRole === 'PENGURUS'
+      ? '/pengurus/dashboard'
+      : '/krama/dashboard';
+const profilePhoto = getGoogleDriveImageUrl(anggota.foto_url || anggota.foto || anggota.foto_drive_id);
+
+const { data: tagihanSemua } = await supabase
+  .from('tagihan_krama')
+  .select('*, event_adat(nama_event)')
+  .eq('anggota_id', anggota.id)
+  .order('created_at', { ascending: false });
+const statusBelumLunas = new Set(['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
+const daftarTunggakan = (tagihanSemua || [])
+  .filter((tagihan) => statusBelumLunas.has((tagihan.status_bayar || '').toUpperCase()))
+  .map((tagihan) => {
+    const total = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+    const dibayar = Number(tagihan.jumlah_dibayar || 0);
+    const jenis = tagihan.jenis_tagihan || tagihan.event_adat?.nama_event || (tagihan.keterangan?.match(/^\[([^\]]+)\]/)?.[1]) || 'Iuran';
+    return { ...tagihan, jenis, sisa: Math.max(0, total - dibayar) };
+  });
+const totalTunggakan = daftarTunggakan.reduce((total, tagihan) => total + tagihan.sisa, 0);
+const totalDenda = daftarTunggakan
+  .filter((tagihan) => /denda/i.test(`${tagihan.jenis} ${tagihan.keterangan || ''}`))
+  .reduce((total, tagihan) => total + tagihan.sisa, 0);
+
+const formatRupiah = (value: number) => new Intl.NumberFormat('id-ID', {
+  style: 'currency',
+  currency: 'IDR',
+  maximumFractionDigits: 0,
+}).format(value);
+
+const hitungUmur = (tanggalLahir: string | null | undefined) => {
+  if (!tanggalLahir) return '-';
+  const lahir = new Date(`${tanggalLahir}T00:00:00`);
+  if (Number.isNaN(lahir.getTime()) || lahir > new Date()) return '-';
+
+  const sekarang = new Date();
+  let umur = sekarang.getFullYear() - lahir.getFullYear();
+  if (
+    sekarang.getMonth() < lahir.getMonth()
+    || (sekarang.getMonth() === lahir.getMonth() && sekarang.getDate() < lahir.getDate())
+  ) {
+    umur -= 1;
+  }
+  return `${umur} tahun`;
+};
+
+const formatTanggal = (value: string | null | undefined) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('id-ID');
+};
+---
+
+<LayoutDashboard title={`Profil ${anggota.nama_lengkap} - Banjar Adat`} role={viewer.role || 'KRAMA'}>
+  <main id="krama-detail-report" class="max-w-4xl mx-auto space-y-6 px-4 sm:px-6 lg:px-8">
+    <div class="no-print flex flex-wrap items-center justify-between gap-3">
+    <a href={returnPath} class="inline-flex items-center gap-2 text-sm font-semibold text-blue-700 hover:text-blue-900">
+      <span aria-hidden="true">&larr;</span> Kembali
+    </a>
+    <PrintReportButton targetId="krama-detail-report" title={`Profil dan Kewajiban ${anggota.nama_lengkap}`} label="Cetak Profil & Kewajiban" />
+    </div>
+
+    <section class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <header class="flex flex-col gap-5 border-b border-slate-200 bg-slate-900 p-6 text-white sm:flex-row sm:items-center">
+        <ProfilePhoto
+          src={profilePhoto}
+          alt={`Foto ${anggota.nama_lengkap}`}
+          fallbackText={anggota.nama_lengkap?.trim().charAt(0).toLocaleUpperCase('id-ID') || '?'}
+          className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-full border-2 border-white/30 bg-amber-500"
+          imageClass="h-full w-full object-cover"
+          fallbackClass="flex h-full w-full items-center justify-center rounded-full text-3xl font-black text-slate-950"
+        />
+        <div>
+          <p class="text-xs font-bold uppercase text-amber-300">Profil Anggota Regu {anggota.no_regu || '-'}</p>
+          <h1 class="mt-1 text-2xl font-black">{anggota.nama_lengkap || 'Profil Anggota'}</h1>
+          <p class="mt-2 text-sm text-slate-300">{anggota.tempekan || 'Tempekan belum diisi'}</p>
+        </div>
+      </header>
+
+      <dl class="grid grid-cols-1 gap-x-8 sm:grid-cols-2">
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Status Keanggotaan</dt>
+          <dd class="mt-1 text-sm font-semibold text-slate-900">{labelStatusKeanggotaan(anggota.status_aktif)}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Role</dt>
+          <dd class="mt-1 text-sm font-semibold text-slate-900">{anggota.role || 'KRAMA'}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Nomor HP</dt>
+          <dd class="mt-1 text-sm text-slate-900">{anggota.no_hp || '-'}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Tempekan</dt>
+          <dd class="mt-1 text-sm text-slate-900">{anggota.tempekan || '-'}</dd>
+        </div>
+        <div class="border-b border-slate-100 p-5 sm:col-span-2">
+          <dt class="text-xs font-bold uppercase text-slate-500">Alamat</dt>
+          <dd class="mt-1 whitespace-pre-wrap text-sm text-slate-900">{anggota.alamat || '-'}</dd>
+        </div>
+        <div class="p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Umur</dt>
+          <dd class="mt-1 text-sm text-slate-900">{hitungUmur(anggota.tanggal_lahir)}</dd>
+        </div>
+        <div class="p-5">
+          <dt class="text-xs font-bold uppercase text-slate-500">Status Perkawinan</dt>
+          <dd class="mt-1 text-sm text-slate-900">{anggota.status_perkawinan?.replaceAll('_', ' ') || '-'}</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="space-y-4">
+      <div>
+        <h2 class="text-lg font-bold text-slate-900">Kewajiban & Tunggakan</h2>
+        <p class="mt-1 text-sm text-slate-500">Rincian kewajiban yang belum lunas, termasuk denda dan sisa pembayaran.</p>
+      </div>
+
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div class="rounded-xl border border-amber-200 bg-amber-50 p-5">
+          <p class="text-xs font-bold uppercase text-amber-800">Total Sisa Tunggakan</p>
+          <p class="mt-2 text-2xl font-black text-amber-950">{formatRupiah(totalTunggakan)}</p>
+        </div>
+        <div class="rounded-xl border border-red-200 bg-red-50 p-5">
+          <p class="text-xs font-bold uppercase text-red-800">Sisa Denda</p>
+          <p class="mt-2 text-2xl font-black text-red-950">{formatRupiah(totalDenda)}</p>
+        </div>
+      </div>
+
+      <div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-sm text-slate-700">
+            <thead class="bg-slate-50 text-xs uppercase text-slate-500">
+              <tr>
+                <th class="p-3">Jenis Kewajiban</th>
+                <th class="p-3">Keterangan</th>
+                <th class="p-3 text-right">Total</th>
+                <th class="p-3 text-right">Sudah Dibayar</th>
+                <th class="p-3 text-right">Sisa</th>
+                <th class="p-3 text-center">Status</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              {daftarTunggakan.length ? daftarTunggakan.map((tagihan) => (
+                <tr>
+                  <td class="p-3 font-semibold">{tagihan.jenis}</td>
+                  <td class="p-3">{tagihan.keterangan?.replace(/^\[[^\]]+\]\s*/, '') || '-'}</td>
+                  <td class="p-3 text-right">{formatRupiah(Number(tagihan.total_nominal ?? tagihan.nominal ?? 0))}</td>
+                  <td class="p-3 text-right">{formatRupiah(Number(tagihan.jumlah_dibayar || 0))}</td>
+                  <td class="p-3 text-right font-bold">{formatRupiah(tagihan.sisa)}</td>
+                  <td class="p-3 text-center">
+                    <span class="inline-block rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800">
+                      {tagihan.status_bayar}
+                    </span>
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colspan="6" class="p-8 text-center text-slate-500">Tidak ada tunggakan atau denda yang belum lunas.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+</LayoutDashboard>

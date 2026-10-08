@@ -1,0 +1,1351 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
+import PrintReportButton from '../../components/common/PrintReportButton.astro';
+import { getGoogleDriveImageUrl } from '../../lib/googleDrivePublic';
+import { labelStatusKeanggotaan } from '../../lib/utils';
+import { formatRupiah } from '../../lib/utils';
+import ProfilePhoto from '../../components/common/ProfilePhoto.astro';
+import '../../styles/global.css';
+
+let errorMessage = '';
+let successMessage = '';
+
+function normalizeFotoUrl(rawUrl: string): string | null {
+  const value = rawUrl.trim();
+  if (!value) return null;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Masukkan link file foto Google Drive yang valid.');
+  }
+
+  if (url.protocol !== 'https:' || !['drive.google.com', 'www.drive.google.com'].includes(url.hostname)) {
+    throw new Error('Gunakan link file dari drive.google.com.');
+  }
+
+  const fileId = url.pathname.match(/\/file\/d\/([^/]+)/)?.[1] || url.searchParams.get('id');
+  if (!fileId) throw new Error('Link tidak dikenali sebagai link file Google Drive.');
+  return `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1000`;
+}
+
+// Handle POST actions (Tambah, Edit, Hapus Anggota)
+if (Astro.request.method === 'POST') {
+  try {
+    const formData = await Astro.request.formData();
+    const action = formData.get('action');
+
+    // 1. TAMBAH ANGGOTA BARU + PASSWORD + URL FOTO
+    if (action === 'tambah') {
+      const nama_lengkap = formData.get('nama_lengkap') as string;
+      const no_hp = formData.get('no_hp') as string;
+      const customEmail = formData.get('email') as string;
+      const password = formData.get('password') as string;
+      const role = formData.get('role') as string;
+      const no_regu = formData.get('no_regu') as string;
+      const tempekan = formData.get('tempekan') as string;
+      const alamat = formData.get('alamat') as string;
+      const status_perkawinan = formData.get('status_perkawinan') as string;
+      const status_aktif = formData.get('status_aktif')?.toString() || 'AKTIF';
+      const fotoUrl = normalizeFotoUrl((formData.get('foto_url') as string) || '');
+
+      if (!['AKTIF', 'TIDAK_AKTIF'].includes(status_aktif)) {
+        throw new Error('Pilih status keanggotaan Ngayah atau Numbas Ayahan.');
+      }
+
+      const cleanNoHp = no_hp.replace(/[^0-9]/g, '');
+      const authEmail = customEmail ? customEmail.trim() : `${cleanNoHp}@banjar.local`;
+
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email: authEmail,
+        password: password,
+      });
+
+      let userId = authData.user?.id || null;
+      if (authError) {
+        const { data: existingAuth, error: existingAuthError } = await supabase.auth.signInWithPassword({
+          email: authEmail,
+          password,
+        });
+        if (existingAuthError || !existingAuth.user) {
+          throw new Error('Gagal membuat akun auth: ' + authError.message);
+        }
+        userId = existingAuth.user.id;
+      }
+      if (!userId) throw new Error('Supabase tidak mengembalikan ID akun pengguna.');
+
+      const { error: dbError } = await supabase.from('anggota').insert([
+        {
+          user_id: userId,
+          nama_lengkap,
+          no_hp,
+          role,
+          no_regu: no_regu ? parseInt(no_regu) : null,
+          tempekan,
+          alamat,
+          status_perkawinan: status_perkawinan || null,
+          foto_url: fotoUrl,
+          status_aktif
+        }
+      ]);
+
+      if (dbError) throw dbError;
+
+      const { error: emailError } = await supabase
+        .from('anggota')
+        .update({ email: authEmail })
+        .eq('user_id', userId);
+      const emailColumnMissing = ['42703', 'PGRST204'].includes(emailError?.code || '')
+        && /email/i.test(emailError?.message || '');
+      if (emailError && !emailColumnMissing) throw emailError;
+
+      successMessage = `Anggota ${nama_lengkap} berhasil ditambahkan!`;
+    }
+
+    // 2. EDIT ANGGOTA
+    else if (action === 'edit') {
+      const id = formData.get('id') as string;
+      const user_id = formData.get('user_id') as string;
+      const nama_lengkap = formData.get('nama_lengkap') as string;
+      const no_hp = (formData.get('no_hp') as string || '').trim() || null;
+      const new_email = (formData.get('new_email') as string || '').trim().toLowerCase();
+      const role = formData.get('role') as string;
+      const no_regu = formData.get('no_regu') as string;
+      const tempekan = formData.get('tempekan') as string;
+      const tanggal_lahir = formData.get('tanggal_lahir') as string;
+      const alamat = formData.get('alamat') as string;
+      const status_perkawinan = formData.get('status_perkawinan') as string;
+      const status_aktif = formData.get('status_aktif') as string;
+      const new_password = formData.get('new_password') as string;
+      const fotoUrl = normalizeFotoUrl((formData.get('foto_url') as string) || '');
+
+      const requestedPassword = new_password.trim();
+      const shouldUpdatePassword = Boolean(requestedPassword);
+      if (shouldUpdatePassword && requestedPassword.length < 6) {
+        throw new Error('Password baru harus minimal 6 karakter.');
+      }
+
+      let authUserId = user_id;
+      let emailForProfile: string | null = null;
+      let newlyCreatedAuthUserId: string | null = null;
+      let supabaseAdmin: ReturnType<typeof createSupabaseAdminClient> | null = null;
+
+      if (new_email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(new_email)) {
+        throw new Error('Masukkan alamat email yang valid.');
+      }
+
+      if (authUserId && (new_email || shouldUpdatePassword)) {
+        supabaseAdmin = createSupabaseAdminClient();
+        const { data: authAccount, error: authAccountError } = await supabaseAdmin.auth.admin.getUserById(authUserId);
+        if (authAccountError || !authAccount.user) {
+          throw new Error('Akun Auth anggota tidak dapat dibaca: ' + (authAccountError?.message || 'akun tidak ditemukan'));
+        }
+
+        const currentEmail = (authAccount.user.email || '').trim().toLowerCase();
+        const requestedEmail = new_email || currentEmail;
+        const shouldUpdateEmail = Boolean(new_email && new_email !== currentEmail);
+        const authChanges: { email?: string; email_confirm?: boolean; password?: string } = {};
+        if (shouldUpdateEmail) {
+          authChanges.email = requestedEmail;
+          authChanges.email_confirm = true;
+          emailForProfile = requestedEmail;
+        }
+        if (shouldUpdatePassword) authChanges.password = requestedPassword;
+
+        const { error: authUpdateError } = await supabaseAdmin.auth.admin.updateUserById(authUserId, authChanges);
+        if (authUpdateError) throw new Error('Gagal memperbarui akun Auth: ' + authUpdateError.message);
+      } else if (!authUserId && (new_email || shouldUpdatePassword)) {
+        if (!new_email) throw new Error('Untuk membuat akun login pertama kali, isi email dan password baru sekaligus.');
+        if (!shouldUpdatePassword) throw new Error('Isi password minimal 6 karakter untuk membuat akun login pertama kali.');
+
+        supabaseAdmin = createSupabaseAdminClient();
+        const { data: createdAccount, error: createAuthError } = await supabaseAdmin.auth.admin.createUser({
+          email: new_email,
+          password: requestedPassword,
+          email_confirm: true,
+          user_metadata: { nama_lengkap },
+        });
+        if (createAuthError || !createdAccount.user) {
+          throw new Error('Gagal membuat akun login: ' + (createAuthError?.message || 'Supabase tidak mengembalikan akun.'));
+        }
+        authUserId = createdAccount.user.id;
+        newlyCreatedAuthUserId = createdAccount.user.id;
+        emailForProfile = new_email;
+      }
+
+      const profileUpdate: Record<string, unknown> = {
+        nama_lengkap,
+        no_hp,
+        role,
+        no_regu: no_regu ? parseInt(no_regu) : null,
+        tempekan,
+        tanggal_lahir: tanggal_lahir || null,
+        alamat,
+        status_perkawinan: status_perkawinan || null,
+        foto_url: fotoUrl,
+        status_aktif,
+      };
+      if (newlyCreatedAuthUserId) profileUpdate.user_id = newlyCreatedAuthUserId;
+      if (emailForProfile) profileUpdate.email = emailForProfile;
+
+      const { error } = await supabase
+        .from('anggota')
+        .update(profileUpdate)
+        .eq('id', id);
+
+      if (error) {
+        if (newlyCreatedAuthUserId && supabaseAdmin) {
+          await supabaseAdmin.auth.admin.deleteUser(newlyCreatedAuthUserId);
+        }
+        throw error;
+      }
+      successMessage = newlyCreatedAuthUserId
+        ? `Data anggota ${nama_lengkap} diperbarui dan akun login berhasil dibuat.`
+        : `Data anggota ${nama_lengkap} berhasil diperbarui!`;
+    }
+
+    // 3. HAPUS ANGGOTA
+    else if (action === 'hapus') {
+      const id = formData.get('id') as string;
+
+      const { error } = await supabase
+        .from('anggota')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+      successMessage = 'Anggota berhasil dihapus dari sistem.';
+    }
+    else if (action === 'hapus_pembayaran') {
+      const paymentId = formData.get('payment_id')?.toString();
+      if (!paymentId) throw new Error('ID transaksi tidak valid.');
+
+      const adminClient = createSupabaseAdminClient();
+      const { data: payment, error: paymentError } = await adminClient
+        .from('riwayat_pembayaran_cicilan')
+        .select('*')
+        .eq('id', paymentId)
+        .maybeSingle();
+      if (paymentError) throw paymentError;
+      if (!payment) throw new Error('Transaksi tidak ditemukan.');
+      if (payment.setoran_regu_id) {
+        throw new Error('Transaksi sudah masuk ke pengajuan setoran dan tidak dapat dihapus.');
+      }
+
+      let previousTagihan: { id: string; jumlah_dibayar: number; status_bayar: string; updated_at?: string } | null = null;
+      if (payment.tagihan_krama_id) {
+        const { data: tagihan, error: tagihanError } = await adminClient
+          .from('tagihan_krama')
+          .select('id, total_nominal, nominal, jumlah_dibayar, status_bayar, updated_at')
+          .eq('id', payment.tagihan_krama_id)
+          .maybeSingle();
+        if (tagihanError) throw tagihanError;
+
+        if (tagihan) {
+          const paidBefore = Number(tagihan.jumlah_dibayar || 0);
+          const paidAfter = Math.max(0, paidBefore - Number(payment.nominal_bayar || 0));
+          const total = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+          const statusAfter = paidAfter >= total
+            ? 'LUNAS'
+            : paidAfter > 0
+              ? 'PARTIAL'
+              : 'BELUM_LUNAS';
+          previousTagihan = {
+            id: tagihan.id,
+            jumlah_dibayar: paidBefore,
+            status_bayar: tagihan.status_bayar,
+            updated_at: tagihan.updated_at,
+          };
+
+          const { error: updateTagihanError } = await adminClient
+            .from('tagihan_krama')
+            .update({ jumlah_dibayar: paidAfter, status_bayar: statusAfter, updated_at: new Date().toISOString() })
+            .eq('id', tagihan.id);
+          if (updateTagihanError) throw updateTagihanError;
+        }
+      }
+
+      const { error: deletePaymentError } = await adminClient
+        .from('riwayat_pembayaran_cicilan')
+        .delete()
+        .eq('id', paymentId);
+      if (deletePaymentError) {
+        if (previousTagihan) {
+          await adminClient.from('tagihan_krama').update({
+            jumlah_dibayar: previousTagihan.jumlah_dibayar,
+            status_bayar: previousTagihan.status_bayar,
+            updated_at: previousTagihan.updated_at,
+          }).eq('id', previousTagihan.id);
+        }
+        throw deletePaymentError;
+      }
+
+      successMessage = 'Riwayat pembayaran berhasil dihapus dan saldo kewajiban diperbarui.';
+    }
+    else if (action === 'hapus_tagihan') {
+      const tagihanId = formData.get('tagihan_id')?.toString();
+      if (!tagihanId) throw new Error('ID tagihan tidak valid.');
+
+      const adminClient = createSupabaseAdminClient();
+      const { data: tagihan, error: tagihanError } = await adminClient
+        .from('tagihan_krama')
+        .select('id, event_adat_id, jumlah_dibayar, keterangan')
+        .eq('id', tagihanId)
+        .maybeSingle();
+      if (tagihanError) throw tagihanError;
+      if (!tagihan) throw new Error('Tagihan tidak ditemukan.');
+      if (tagihan.event_adat_id) {
+        throw new Error('Tagihan ini berasal dari event. Batalkan event terkait pada bagian Event Kewajiban.');
+      }
+      if (Number(tagihan.jumlah_dibayar || 0) > 0) {
+        throw new Error('Tagihan masih memiliki nominal pembayaran. Hapus atau koreksi pembayaran terlebih dahulu.');
+      }
+
+      const { data: payments, error: paymentsError } = await adminClient
+        .from('riwayat_pembayaran_cicilan')
+        .select('id')
+        .eq('tagihan_krama_id', tagihanId);
+      if (paymentsError) throw paymentsError;
+      if (payments?.length) {
+        throw new Error('Tagihan masih memiliki riwayat pembayaran. Hapus transaksi pembayaran terlebih dahulu.');
+      }
+
+      const { data: deletedTagihan, error: deleteTagihanError } = await adminClient
+        .from('tagihan_krama')
+        .delete()
+        .eq('id', tagihanId)
+        .select('id')
+        .maybeSingle();
+      if (deleteTagihanError) throw deleteTagihanError;
+      if (!deletedTagihan) throw new Error('Tagihan tidak ditemukan atau sudah dihapus.');
+
+      successMessage = 'Catatan/tagihan manual berhasil dihapus.';
+    }
+    else if (action === 'balikkan_setoran') {
+      const setoranId = formData.get('setoran_id')?.toString();
+      const accessToken = Astro.cookies.get('sb-access-token')?.value;
+      if (!setoranId) throw new Error('ID setoran tidak valid.');
+      if (!accessToken) throw new Error('Sesi Admin tidak ditemukan. Silakan login kembali.');
+
+      const { data: { user }, error: userError } = await supabase.auth.getUser(accessToken);
+      if (userError || !user) throw new Error('Sesi Admin tidak valid. Silakan login kembali.');
+
+      const { data: adminProfile, error: adminProfileError } = await supabase
+        .from('anggota')
+        .select('id, role')
+        .eq('user_id', user.id)
+        .maybeSingle();
+      if (adminProfileError) throw adminProfileError;
+      if (!adminProfile || (adminProfile.role || '').toUpperCase().replace(/[\s_-]/g, '') !== 'ADMIN') {
+        throw new Error('Pembalikan setoran hanya dapat dilakukan oleh Admin.');
+      }
+
+      const adminClient = createSupabaseAdminClient();
+      const { data: reversedPayments, error: reversalError } = await adminClient.rpc('admin_reverse_verified_setoran', {
+        p_setoran_id: setoranId,
+        p_admin_id: adminProfile.id,
+      });
+      if (reversalError) throw reversalError;
+
+      successMessage = `Setoran dibalik. ${reversedPayments || 0} transaksi kini dapat dihapus melalui Riwayat Transaksi Pembayaran.`;
+    }
+    else if (action === 'batalkan_event') {
+      const eventId = formData.get('event_id')?.toString();
+      if (!eventId) throw new Error('ID event tidak valid.');
+
+      const adminClient = createSupabaseAdminClient();
+      const { data: event, error: eventError } = await adminClient
+        .from('event_adat')
+        .select('id, nama_event')
+        .eq('id', eventId)
+        .maybeSingle();
+      if (eventError) throw eventError;
+      if (!event) throw new Error('Event tidak ditemukan.');
+
+      const { data: obligations, error: obligationsError } = await adminClient
+        .from('tagihan_krama')
+        .select('id')
+        .eq('event_adat_id', eventId);
+      if (obligationsError) throw obligationsError;
+
+      const obligationIds = (obligations || []).map((obligation) => obligation.id);
+      if (obligationIds.length) {
+        const { data: payments, error: paymentsError } = await adminClient
+          .from('riwayat_pembayaran_cicilan')
+          .select('id')
+          .in('tagihan_krama_id', obligationIds);
+        if (paymentsError) throw paymentsError;
+        if (payments?.length) {
+          throw new Error('Event tidak dapat dibatalkan karena sudah memiliki pembayaran. Hapus transaksi yang belum disetorkan terlebih dahulu.');
+        }
+      }
+
+      const { data: deletedEvent, error: deleteEventError } = await adminClient
+        .from('event_adat')
+        .delete()
+        .eq('id', eventId)
+        .select('id')
+        .maybeSingle();
+      if (deleteEventError) throw deleteEventError;
+      if (!deletedEvent) throw new Error('Event tidak ditemukan atau sudah dibatalkan.');
+
+      successMessage = `Event "${event.nama_event}" dibatalkan dan tagihan terkait dihapus.`;
+    }
+  } catch (err: any) {
+    errorMessage = 'Terjadi kesalahan: ' + err.message;
+  }
+}
+
+const { data: listAnggota } = await supabase
+  .from('anggota')
+  .select('*')
+  .order('nama_lengkap', { ascending: true });
+
+const adminDataClient = createSupabaseAdminClient();
+const [{ data: listAdminEvents, error: eventsError }, { data: listAdminPayments, error: paymentsError }, { data: listAdminObligations, error: obligationsError }, { data: listVerifiedDeposits, error: depositsError }] = await Promise.all([
+  adminDataClient.from('event_adat').select('*').order('tanggal_event', { ascending: false }),
+  adminDataClient.from('riwayat_pembayaran_cicilan').select('*').order('tanggal_bayar', { ascending: false }),
+  adminDataClient.from('tagihan_krama').select('*').order('tanggal_kejadian', { ascending: false }),
+  adminDataClient.from('setoran_regu').select('*').eq('status_verifikasi', 'VERIFIED').order('tanggal_verifikasi', { ascending: false }),
+]);
+const managementDataError = eventsError?.message || paymentsError?.message || obligationsError?.message || depositsError?.message || '';
+const adminMembersById = new Map((listAnggota || []).map((member) => [member.id, member]));
+const listManualObligations = (listAdminObligations || []).filter((obligation) => !obligation.event_adat_id);
+const obligationsByEvent = new Map<string, string[]>();
+for (const obligation of listAdminObligations || []) {
+  if (!obligation.event_adat_id) continue;
+  const obligationIds = obligationsByEvent.get(obligation.event_adat_id) || [];
+  obligationIds.push(obligation.id);
+  obligationsByEvent.set(obligation.event_adat_id, obligationIds);
+}
+const paymentsByObligation = new Map<string, number>();
+const paymentsByDeposit = new Map<string, number>();
+for (const payment of listAdminPayments || []) {
+  if (payment.tagihan_krama_id) {
+    paymentsByObligation.set(payment.tagihan_krama_id, (paymentsByObligation.get(payment.tagihan_krama_id) || 0) + 1);
+  }
+  if (payment.setoran_regu_id) {
+    paymentsByDeposit.set(payment.setoran_regu_id, (paymentsByDeposit.get(payment.setoran_regu_id) || 0) + 1);
+  }
+}
+---
+
+<LayoutDashboard title="Admin Dashboard - Banjar Adat" role="ADMIN">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+    
+    <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
+      <div>
+        <span class="text-xs font-bold px-3 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-full">
+          Portal Administrator Banjar
+        </span>
+        <h1 class="text-xl md:text-2xl font-black mt-2">Manajemen Data Krama & Hak Akses</h1>
+      </div>
+      <div class="text-xs text-slate-400">
+        <span>Total Krama Terdaftar: <strong class="text-white">{listAnggota?.length || 0} Orang</strong></span>
+      </div>
+    </div>
+
+    {successMessage && (
+      <div class="p-4 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold rounded-xl">
+        {successMessage}
+      </div>
+    )}
+    {errorMessage && (
+      <div class="p-4 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold rounded-xl">
+        {errorMessage}
+      </div>
+    )}
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      
+      <!-- Form Tambah Krama -->
+      <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4 h-fit">
+        <div>
+          <h2 class="text-base font-bold text-slate-800">Tambah Krama Baru</h2>
+          <p class="text-xs text-slate-500 mt-0.5">Daftarkan krama baru, password, dan upload foto.</p>
+        </div>
+
+        <form method="POST" class="space-y-3">
+          <input type="hidden" name="action" value="tambah" />
+          
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nama Lengkap & Gelar</label>
+            <input type="text" name="nama_lengkap" required placeholder="Contoh: Wayan Sudana" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nomor WhatsApp / HP</label>
+            <input type="text" name="no_hp" required placeholder="08123456789" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Email (Opsional)</label>
+            <input type="email" name="email" placeholder="biarkan kosong jika pakai no hp" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Password Login</label>
+            <input type="password" name="password" required placeholder="Minimal 6 karakter" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Role / Hak Akses</label>
+              <select name="role" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+                <option value="KRAMA">KRAMA</option>
+                <option value="KEPALA_REGU">Kepala Regu</option>
+                <option value="BENDAHARA">Bendahara</option>
+                <option value="PENGURUS">Pengurus</option>
+                <option value="ADMIN">Admin</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">No. Regu</label>
+              <input type="number" name="no_regu" placeholder="1" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Keanggotaan</label>
+            <select name="status_aktif" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+              <option value="AKTIF" selected>Ngayah</option>
+              <option value="TIDAK_AKTIF">Numbas Ayahan</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tempekan / Banjar Dinas</label>
+            <input type="text" name="tempekan" placeholder="Contoh: Tempekan Kaja" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Perkawinan</label>
+            <select name="status_perkawinan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+              <option value="">-- Pilih Status --</option>
+              <option value="BELUM_MENIKAH">Belum Menikah</option>
+              <option value="MENIKAH">Menikah</option>
+              <option value="CERAI_HIDUP">Cerai Hidup</option>
+              <option value="CERAI_MATI">Cerai Mati</option>
+            </select>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Alamat Lengkap</label>
+            <textarea name="alamat" rows="2" placeholder="Contoh: Br. Dukuh, Desa..." class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50"></textarea>
+          </div>
+
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Link Foto Google Drive</label>
+            <input type="url" name="foto_url" placeholder="https://drive.google.com/file/d/.../view" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+            <span class="text-[10px] text-slate-400">Unggah foto manual ke Drive, lalu bagikan file sebagai “Anyone with the link”.</span>
+          </div>
+
+          <button type="submit" class="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl transition shadow-md">
+            Simpan & Daftarkan Krama
+          </button>
+        </form>
+      </div>
+
+      <!-- Tabel Daftar Anggota -->
+      <div class="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+        <div class="flex justify-between items-center">
+          <h2 class="text-base font-bold text-slate-800">Daftar Seluruh Anggota Krama Banjar</h2>
+          <div class="flex items-center gap-3">
+            <span class="text-xs text-slate-500">Kelola Status & Akses</span>
+            <PrintReportButton targetId="admin-anggota-report" title="Daftar Anggota Krama" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-500">Cari anggota</span>
+            <input id="admin-member-search" type="search" autocomplete="off" placeholder="Nama, nomor HP, email, regu, tempekan, alamat, role, status..." class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+          </label>
+          <p id="admin-member-count" class="text-xs text-slate-500 sm:pb-2" aria-live="polite">Menampilkan {listAnggota?.length || 0} anggota</p>
+        </div>
+
+        <div id="admin-anggota-report" class="overflow-x-auto">
+          <table class="w-full text-xs text-left text-slate-600">
+            <thead class="bg-slate-50 text-slate-500 uppercase border-b border-slate-200">
+              <tr>
+                <th class="p-3" aria-sort="ascending">
+                  <button type="button" data-admin-sort="name" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                    Anggota <span data-admin-sort-indicator aria-hidden="true">↑</span>
+                  </button>
+                </th>
+                <th class="p-3" aria-sort="none">
+                  <button type="button" data-admin-sort="regu" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                    Regu / Tempekan / Alamat <span data-admin-sort-indicator aria-hidden="true">↕</span>
+                  </button>
+                </th>
+                <th class="p-3" aria-sort="none">
+                  <button type="button" data-admin-sort="role" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                    Role <span data-admin-sort-indicator aria-hidden="true">↕</span>
+                  </button>
+                </th>
+                <th class="p-3 text-center" aria-sort="none">
+                  <button type="button" data-admin-sort="status" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
+                    Status <span data-admin-sort-indicator aria-hidden="true">↕</span>
+                  </button>
+                </th>
+                <th class="print-hide p-3 text-center">Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="admin-member-rows" class="divide-y divide-slate-100">
+              {listAnggota && listAnggota.length > 0 ? (
+                listAnggota.map((krama) => (
+                  <tr
+                    class="admin-member-row hover:bg-slate-50"
+                    data-name={krama.nama_lengkap || ''}
+                    data-regu={krama.no_regu || ''}
+                    data-tempekan={krama.tempekan || ''}
+                    data-address={krama.alamat || ''}
+                    data-role={krama.role || 'KRAMA'}
+                    data-status={krama.status_aktif || 'AKTIF'}
+                    data-search={`${krama.nama_lengkap || ''} ${krama.no_hp || ''} ${krama.email || ''} ${krama.no_regu || ''} ${krama.tempekan || ''} ${krama.alamat || ''} ${krama.role || 'KRAMA'} ${labelStatusKeanggotaan(krama.status_aktif)}`.toLocaleLowerCase('id-ID')}
+                  >
+                    <td class="p-3">
+                      <div class="flex items-center gap-3">
+                        <ProfilePhoto
+                          src={getGoogleDriveImageUrl(krama.foto_url || krama.foto || krama.foto_drive_id)}
+                          alt={`Foto ${krama.nama_lengkap}`}
+                          fallbackText={krama.nama_lengkap?.trim().charAt(0).toLocaleUpperCase('id-ID') || '?'}
+                          className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-200 shadow-sm"
+                          imageClass="h-full w-full object-cover"
+                          fallbackClass="flex h-full w-full items-center justify-center rounded-full text-xs font-bold text-slate-600"
+                        />
+                        <div>
+                          <a href={`/krama/detail?id=${krama.id}`} class="font-semibold text-blue-700 hover:underline focus-visible:outline-2 focus-visible:outline-blue-600">
+                            {krama.nama_lengkap}
+                          </a>
+                          <div class="text-[11px] text-slate-400">{krama.no_hp}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td class="p-3">
+                      <div class="font-medium text-slate-800">Regu {krama.no_regu || '-'} ({krama.tempekan || '-'})</div>
+                      <div class="text-[11px] text-slate-400 truncate max-w-xs">{krama.alamat || 'Alamat belum diatur'}</div>
+                    </td>
+                    <td class="p-3">
+                      <span class="px-2 py-0.5 bg-slate-100 text-slate-800 rounded-full font-bold text-[10px]">
+                        {krama.role || 'KRAMA'}
+                      </span>
+                    </td>
+                    <td class="p-3 text-center">
+                      <span class={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                        krama.status_aktif === 'TIDAK_AKTIF' ? 'bg-red-100 text-red-800' : krama.status_aktif === 'BELUM_DILENGKAPI' ? 'bg-slate-100 text-slate-700' : 'bg-emerald-100 text-emerald-800'
+                      }`}>
+                        {labelStatusKeanggotaan(krama.status_aktif)}
+                      </span>
+                    </td>
+                    <td class="print-hide p-3 text-center">
+                      <div class="inline-flex items-center gap-1.5">
+                        <!-- Tombol Edit AMAN TANPA ERROR STRING -->
+                        <button 
+                          type="button" 
+                          class="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold rounded-lg transition btn-edit"
+                          data-krama={JSON.stringify(krama)}
+                          title="Edit"
+                        >
+                          ✏️ Edit
+                        </button>
+
+                        <!-- Tombol Hapus -->
+                        <form method="POST" onsubmit="return confirm('Yakin ingin menghapus krama ini?');" class="inline">
+                          <input type="hidden" name="action" value="hapus" />
+                          <input type="hidden" name="id" value={krama.id} />
+                          <button type="submit" class="px-2.5 py-1 bg-red-100 hover:bg-red-200 text-red-700 font-bold rounded-lg transition" title="Hapus">
+                            🗑️ Hapus
+                          </button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colspan="5" class="p-6 text-center text-slate-400 italic">Belum ada data anggota krama.</td>
+                </tr>
+              )}
+              <tr id="admin-member-no-results" class="hidden">
+                <td colspan="5" class="p-6 text-center text-slate-400 italic">Tidak ada anggota yang cocok dengan pencarian.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <label class="text-xs font-semibold text-slate-600">Baris per halaman <select id="admin-member-page-size" class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+          <div class="flex items-center justify-end gap-2">
+            <button id="admin-member-page-previous" type="button" class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button>
+            <nav id="admin-member-page-links" class="flex items-center gap-1" aria-label="Halaman daftar anggota"></nav>
+            <button id="admin-member-page-next" type="button" class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    {managementDataError && (
+      <div role="alert" class="rounded-xl border border-red-200 bg-red-50 p-4 text-xs font-semibold text-red-800">
+        Gagal memuat pengelolaan transaksi/event: {managementDataError}
+      </div>
+    )}
+
+    <div class="grid grid-cols-1 gap-6 xl:grid-cols-2">
+      <section class="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div>
+          <h2 class="text-base font-bold text-slate-800">Riwayat Transaksi Pembayaran</h2>
+          <p class="mt-1 text-xs text-slate-500">Hapus koreksi transaksi yang belum masuk ke setoran regu. Saldo kewajiban akan disesuaikan.</p>
+        </div>
+        <label class="block space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Cari transaksi</span>
+          <input type="search" data-admin-table-search="admin-payment-rows" placeholder="Nama anggota, metode, keterangan..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+        <div class="max-h-96 overflow-auto rounded-lg border border-slate-200">
+          <table class="w-full min-w-155 text-left text-xs text-slate-600">
+            <thead class="sticky top-0 bg-slate-50 text-[10px] uppercase text-slate-500">
+              <tr>
+                <th class="p-3" aria-sort="descending"><button type="button" data-admin-table-sort="payment-date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tanggal / Anggota <span data-admin-table-sort-indicator>↓</span></button></th>
+                <th class="p-3" aria-sort="none"><button type="button" data-admin-table-sort="payment-method" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Metode <span data-admin-table-sort-indicator>↕</span></button></th>
+                <th class="p-3 text-right" aria-sort="none"><button type="button" data-admin-table-sort="payment-amount" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Nominal <span data-admin-table-sort-indicator>↕</span></button></th>
+                <th class="p-3 text-center">Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="admin-payment-rows" class="divide-y divide-slate-100">
+              {listAdminPayments?.length ? listAdminPayments.map((payment) => {
+                const member = adminMembersById.get(payment.anggota_id);
+                const depositLinked = Boolean(payment.setoran_regu_id);
+                return (
+                  <tr class="admin-page-row hover:bg-slate-50" data-admin-search={`${member?.nama_lengkap || ''} ${payment.metode_pembayaran || ''} ${payment.keterangan || ''}`.toLocaleLowerCase('id-ID')} data-payment-date={payment.tanggal_bayar || payment.created_at || ''} data-payment-method={payment.metode_pembayaran || ''} data-payment-amount={Number(payment.nominal_bayar || 0)}>
+                    <td class="p-3">
+                      <p class="font-semibold text-slate-900">{member?.nama_lengkap || 'Anggota tidak ditemukan'}</p>
+                      <p class="mt-1 text-[10px] text-slate-500">{payment.tanggal_bayar ? new Date(payment.tanggal_bayar).toLocaleDateString('id-ID') : '-'}</p>
+                    </td>
+                    <td class="p-3">
+                      <p>{payment.metode_pembayaran || '-'}</p>
+                      <p class="mt-1 max-w-40 truncate text-[10px] text-slate-500" title={payment.keterangan || ''}>{payment.keterangan || '-'}</p>
+                    </td>
+                    <td class="whitespace-nowrap p-3 text-right font-bold text-slate-900">{formatRupiah(Number(payment.nominal_bayar || 0))}</td>
+                    <td class="p-3 text-center">
+                      {depositLinked ? (
+                        <span class="text-[10px] font-semibold text-slate-400" title="Transaksi sudah terhubung ke setoran regu">Masuk setoran</span>
+                      ) : (
+                        <form method="POST" onsubmit="return confirm('Hapus riwayat pembayaran ini? Saldo kewajiban anggota akan dikurangi sesuai nominal transaksi.');">
+                          <input type="hidden" name="action" value="hapus_pembayaran" />
+                          <input type="hidden" name="payment_id" value={payment.id} />
+                          <button type="submit" class="rounded-lg border border-red-200 px-2.5 py-1.5 font-bold text-red-700 transition hover:bg-red-50">Hapus</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                );
+              }) : (
+                <tr><td colspan="4" class="p-6 text-center text-slate-400">Belum ada riwayat pembayaran.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-admin-pagination="admin-payment-rows">
+          <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-admin-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+          <div class="flex items-center justify-end gap-2"><span data-admin-page-summary class="mr-2 text-xs text-slate-500" aria-live="polite"></span><button type="button" data-admin-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-admin-page-links class="flex items-center gap-1" aria-label="Halaman riwayat pembayaran"></nav><button type="button" data-admin-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+        </div>
+      </section>
+
+      <section class="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+        <div>
+          <h2 class="text-base font-bold text-slate-800">Event Kewajiban</h2>
+          <p class="mt-1 text-xs text-slate-500">Pembatalan event menghapus tagihan terkait. Event dengan transaksi pembayaran belum dapat dibatalkan.</p>
+        </div>
+        <label class="block space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Cari event</span>
+          <input type="search" data-admin-table-search="admin-event-rows" placeholder="Nama event, jenis..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+        <div class="max-h-96 overflow-auto rounded-lg border border-slate-200">
+          <table class="w-full min-w-150 text-left text-xs text-slate-600">
+            <thead class="sticky top-0 bg-slate-50 text-[10px] uppercase text-slate-500">
+              <tr>
+                <th class="p-3" aria-sort="ascending"><button type="button" data-admin-table-sort="event-name" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Event <span data-admin-table-sort-indicator>↑</span></button></th>
+                <th class="p-3" aria-sort="none"><button type="button" data-admin-table-sort="event-date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tanggal / Tagihan <span data-admin-table-sort-indicator>↕</span></button></th>
+                <th class="p-3 text-right" aria-sort="none"><button type="button" data-admin-table-sort="event-amount" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tarif <span data-admin-table-sort-indicator>↕</span></button></th>
+                <th class="p-3 text-center">Aksi</th>
+              </tr>
+            </thead>
+            <tbody id="admin-event-rows" class="divide-y divide-slate-100">
+              {listAdminEvents?.length ? listAdminEvents.map((event) => {
+                const obligationIds = obligationsByEvent.get(event.id) || [];
+                const paymentCount = obligationIds.reduce((total, obligationId) => total + (paymentsByObligation.get(obligationId) || 0), 0);
+                return (
+                  <tr class="admin-page-row hover:bg-slate-50" data-admin-search={`${event.nama_event || ''} ${event.jenis_event || ''}`.toLocaleLowerCase('id-ID')} data-event-name={event.nama_event || ''} data-event-date={event.tanggal_event || ''} data-event-amount={Number(event.tarif_default || 0)}>
+                    <td class="p-3">
+                      <p class="font-semibold text-slate-900">{event.nama_event || 'Event tanpa nama'}</p>
+                      <p class="mt-1 text-[10px] text-slate-500">{event.jenis_event || '-'}</p>
+                    </td>
+                    <td class="p-3">
+                      <p>{event.tanggal_event || '-'}</p>
+                      <p class="mt-1 text-[10px] text-slate-500">{obligationIds.length} tagihan · {paymentCount} pembayaran</p>
+                    </td>
+                    <td class="whitespace-nowrap p-3 text-right font-bold text-slate-900">{formatRupiah(Number(event.tarif_default || 0))}</td>
+                    <td class="p-3 text-center">
+                      {paymentCount > 0 ? (
+                        <span class="text-[10px] font-semibold text-slate-400" title="Hapus pembayaran yang belum disetorkan terlebih dahulu">Ada pembayaran</span>
+                      ) : (
+                        <form method="POST" onsubmit="return confirm('Batalkan event kewajiban ini? Event dan seluruh tagihan yang terkait akan dihapus.');">
+                          <input type="hidden" name="action" value="batalkan_event" />
+                          <input type="hidden" name="event_id" value={event.id} />
+                          <button type="submit" class="rounded-lg border border-red-200 px-2.5 py-1.5 font-bold text-red-700 transition hover:bg-red-50">Batalkan</button>
+                        </form>
+                      )}
+                    </td>
+                  </tr>
+                );
+              }) : (
+                <tr><td colspan="4" class="p-6 text-center text-slate-400">Belum ada event kewajiban.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-admin-pagination="admin-event-rows">
+          <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-admin-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+          <div class="flex items-center justify-end gap-2"><span data-admin-page-summary class="mr-2 text-xs text-slate-500" aria-live="polite"></span><button type="button" data-admin-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-admin-page-links class="flex items-center gap-1" aria-label="Halaman event kewajiban"></nav><button type="button" data-admin-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div>
+        <h2 class="text-base font-bold text-slate-800">Catatan Tagihan Manual</h2>
+        <p class="mt-1 text-xs text-slate-500">Hapus catatan dummy yang bukan bagian dari event dan belum memiliki pembayaran. Baris ini tampil terpisah dari riwayat pembayaran pada layar bendahara.</p>
+      </div>
+      <label class="block space-y-1">
+        <span class="text-[11px] font-bold uppercase text-slate-500">Cari catatan</span>
+        <input type="search" data-admin-table-search="admin-manual-obligation-rows" placeholder="Nama anggota, tanggal, keterangan..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+      </label>
+      <div class="overflow-x-auto rounded-lg border border-slate-200">
+        <table class="w-full min-w-190 text-left text-xs text-slate-600">
+          <thead class="bg-slate-50 text-[10px] uppercase text-slate-500">
+            <tr>
+              <th class="p-3" aria-sort="ascending"><button type="button" data-admin-table-sort="obligation-member" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Anggota / Tanggal <span data-admin-table-sort-indicator>↑</span></button></th>
+              <th class="p-3" aria-sort="none"><button type="button" data-admin-table-sort="obligation-description" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Catatan <span data-admin-table-sort-indicator>↕</span></button></th>
+              <th class="p-3 text-right" aria-sort="none"><button type="button" data-admin-table-sort="obligation-amount" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Nominal <span data-admin-table-sort-indicator>↕</span></button></th>
+              <th class="p-3 text-right">Dibayar</th>
+              <th class="p-3 text-center">Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="admin-manual-obligation-rows" class="divide-y divide-slate-100">
+            {listManualObligations.length ? (
+              listManualObligations.map((obligation) => (
+                  <tr class="admin-page-row hover:bg-slate-50" data-admin-search={`${adminMembersById.get(obligation.anggota_id)?.nama_lengkap || ''} ${obligation.tanggal_kejadian || ''} ${obligation.keterangan || obligation.jenis_tagihan || ''}`.toLocaleLowerCase('id-ID')} data-obligation-member={adminMembersById.get(obligation.anggota_id)?.nama_lengkap || ''} data-obligation-description={obligation.keterangan || obligation.jenis_tagihan || ''} data-obligation-amount={Number(obligation.total_nominal ?? obligation.nominal ?? 0)}>
+                    <td class="p-3">
+                      <p class="font-semibold text-slate-900">{adminMembersById.get(obligation.anggota_id)?.nama_lengkap || 'Anggota tidak ditemukan'}</p>
+                      <p class="mt-1 text-[10px] text-slate-500">{obligation.tanggal_kejadian || obligation.created_at?.split('T')[0] || '-'}</p>
+                    </td>
+                    <td class="max-w-sm whitespace-pre-wrap p-3">{obligation.keterangan || obligation.jenis_tagihan || 'Catatan keuangan'}</td>
+                    <td class="whitespace-nowrap p-3 text-right font-semibold">{formatRupiah(Number(obligation.total_nominal ?? obligation.nominal ?? 0))}</td>
+                    <td class="whitespace-nowrap p-3 text-right">{formatRupiah(Number(obligation.jumlah_dibayar || 0))}</td>
+                    <td class="p-3 text-center">
+                      {(paymentsByObligation.get(obligation.id) || 0) === 0 && Number(obligation.jumlah_dibayar || 0) <= 0 ? (
+                        <form method="POST" onsubmit="return confirm('Hapus catatan/tagihan manual ini? Tindakan ini tidak dapat dibatalkan.');">
+                          <input type="hidden" name="action" value="hapus_tagihan" />
+                          <input type="hidden" name="tagihan_id" value={obligation.id} />
+                          <button type="submit" class="rounded-lg border border-red-200 px-2.5 py-1.5 font-bold text-red-700 transition hover:bg-red-50">Hapus Catatan</button>
+                        </form>
+                      ) : (
+                        <span class="text-[10px] font-semibold text-slate-400" title="Hapus atau koreksi pembayaran terlebih dahulu">Memiliki pembayaran</span>
+                      )}
+                    </td>
+                  </tr>
+              ))
+            ) : (
+                <tr><td colspan="5" class="p-6 text-center text-slate-400">Tidak ada catatan tagihan manual.</td></tr>
+              )}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-admin-pagination="admin-manual-obligation-rows">
+        <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-admin-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+        <div class="flex items-center justify-end gap-2"><span data-admin-page-summary class="mr-2 text-xs text-slate-500" aria-live="polite"></span><button type="button" data-admin-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-admin-page-links class="flex items-center gap-1" aria-label="Halaman catatan tagihan"></nav><button type="button" data-admin-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+      </div>
+    </section>
+
+    <section class="space-y-4 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div>
+        <h2 class="text-base font-bold text-slate-800">Pembalikan Setoran Terverifikasi</h2>
+        <p class="mt-1 text-xs text-slate-500">Pembalikan mengubah setoran menjadi REJECTED, melepas transaksi, dan memulihkan status tagihan. Setelahnya transaksi dapat dihapus dari daftar riwayat di atas.</p>
+      </div>
+      <label class="block space-y-1">
+        <span class="text-[11px] font-bold uppercase text-slate-500">Cari setoran</span>
+        <input type="search" data-admin-table-search="admin-verified-deposit-rows" placeholder="Nama kepala regu atau regu..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+      </label>
+      <div class="overflow-x-auto rounded-lg border border-slate-200">
+        <table class="w-full min-w-175 text-left text-xs text-slate-600">
+          <thead class="bg-slate-50 text-[10px] uppercase text-slate-500">
+            <tr>
+              <th class="p-3" aria-sort="ascending"><button type="button" data-admin-table-sort="deposit-regu" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Regu / Kepala Regu <span data-admin-table-sort-indicator>↑</span></button></th>
+              <th class="p-3" aria-sort="none"><button type="button" data-admin-table-sort="deposit-date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tanggal Verifikasi <span data-admin-table-sort-indicator>↕</span></button></th>
+              <th class="p-3 text-right" aria-sort="none"><button type="button" data-admin-table-sort="deposit-amount" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Nominal Setoran <span data-admin-table-sort-indicator>↕</span></button></th>
+              <th class="p-3 text-center">Transaksi Tertaut</th>
+              <th class="p-3 text-center">Aksi</th>
+            </tr>
+          </thead>
+          <tbody id="admin-verified-deposit-rows" class="divide-y divide-slate-100">
+            {listVerifiedDeposits?.length ? listVerifiedDeposits.map((deposit) => {
+              const paymentCount = paymentsByDeposit.get(deposit.id) || 0;
+              const headName = adminMembersById.get(deposit.kepala_regu_id)?.nama_lengkap || 'Kepala Regu';
+              return (
+                <tr class="admin-page-row hover:bg-slate-50" data-admin-search={`${deposit.regu_id || ''} ${headName}`.toLocaleLowerCase('id-ID')} data-deposit-regu={`${deposit.regu_id || ''} ${headName}`} data-deposit-date={deposit.tanggal_verifikasi || deposit.created_at || ''} data-deposit-amount={Number(deposit.total_nominal || 0)}>
+                  <td class="p-3">
+                    <p class="font-semibold text-slate-900">Regu {deposit.regu_id || '-'}</p>
+                    <p class="mt-1 text-[10px] text-slate-500">{headName}</p>
+                  </td>
+                  <td class="p-3">{deposit.tanggal_verifikasi ? new Date(deposit.tanggal_verifikasi).toLocaleDateString('id-ID') : '-'}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-bold text-slate-900">{formatRupiah(Number(deposit.total_nominal || 0))}</td>
+                  <td class="p-3 text-center">{paymentCount}</td>
+                  <td class="p-3 text-center">
+                    {paymentCount ? (
+                      <form method="POST" onsubmit="return confirm('Balikkan setoran terverifikasi ini? Transaksi akan dilepas dari setoran dan status tagihan dipulihkan. Setelahnya transaksi dapat dihapus.');">
+                        <input type="hidden" name="action" value="balikkan_setoran" />
+                        <input type="hidden" name="setoran_id" value={deposit.id} />
+                        <button type="submit" class="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 font-bold text-amber-900 transition hover:bg-amber-100">Balikkan Setoran</button>
+                      </form>
+                    ) : (
+                      <span class="text-[10px] font-semibold text-slate-400">Tidak ada transaksi tertaut</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            }) : (
+              <tr><td colspan="5" class="p-6 text-center text-slate-400">Tidak ada setoran terverifikasi yang dapat dibalik.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-admin-pagination="admin-verified-deposit-rows">
+        <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-admin-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+        <div class="flex items-center justify-end gap-2"><span data-admin-page-summary class="mr-2 text-xs text-slate-500" aria-live="polite"></span><button type="button" data-admin-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-admin-page-links class="flex items-center gap-1" aria-label="Halaman setoran verified"></nav><button type="button" data-admin-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- MODAL EDIT ANGGOTA & PASSWORD -->
+  <div id="editModal" class="hidden fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm items-center justify-center p-4">
+    <div class="bg-white max-w-lg w-full p-6 rounded-2xl shadow-2xl border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+      <div class="flex justify-between items-center border-b border-slate-100 pb-3">
+        <h3 class="text-base font-bold text-slate-900">Edit Data, Password & Foto Krama</h3>
+        <button type="button" onclick="closeEditModal()" class="text-slate-400 hover:text-slate-600 font-bold text-lg">&times;</button>
+      </div>
+
+      <form method="POST" class="space-y-3">
+        <input type="hidden" name="action" value="edit" />
+        <input type="hidden" id="edit_id" name="id" />
+        <input type="hidden" id="edit_user_id" name="user_id" />
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nama Lengkap & Gelar</label>
+          <input type="text" id="edit_nama_lengkap" name="nama_lengkap" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Nomor WhatsApp / HP</label>
+          <input type="text" id="edit_no_hp" name="no_hp" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Email Akun</label>
+          <input type="email" id="edit_email" name="new_email" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          <span class="text-[10px] text-slate-400">Untuk profil yang belum punya akun login, isi email dan password baru sekaligus. Untuk akun yang sudah ada, isi email baru hanya jika ingin menggantinya.</span>
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Password Baru / Password Login Pertama</label>
+          <input type="password" name="new_password" placeholder="Kosongkan jika tidak ingin mengubah password" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          <span class="text-[10px] text-slate-400">Isi minimal 6 karakter jika ingin mereset password anggota ini.</span>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Role / Hak Akses</label>
+            <select id="edit_role" name="role" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+              <option value="KRAMA">KRAMA</option>
+              <option value="KEPALA_REGU">Kepala Regu</option>
+              <option value="BENDAHARA">Bendahara</option>
+              <option value="PENGURUS">Pengurus</option>
+              <option value="ADMIN">Admin</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">No. Regu</label>
+            <input type="number" id="edit_no_regu" name="no_regu" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tempekan</label>
+            <input type="text" id="edit_tempekan" name="tempekan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          </div>
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Perkawinan</label>
+            <select id="edit_status_perkawinan" name="status_perkawinan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+              <option value="">-- Pilih Status --</option>
+              <option value="BELUM_MENIKAH">Belum Menikah</option>
+              <option value="MENIKAH">Menikah</option>
+              <option value="CERAI_HIDUP">Cerai Hidup</option>
+              <option value="CERAI_MATI">Cerai Mati</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tanggal Lahir</label>
+          <input type="date" id="edit_tanggal_lahir" name="tanggal_lahir" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+        </div>
+
+        <div>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Keaktifan</label>
+            <select id="edit_status_aktif" name="status_aktif" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
+              <option value="AKTIF">Ngayah</option>
+              <option value="TIDAK_AKTIF">Numbas Ayahan</option>
+              <option value="BELUM_DILENGKAPI">Belum dilengkapi</option>
+            </select>
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Alamat Lengkap</label>
+          <textarea id="edit_alamat" name="alamat" rows="2" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50"></textarea>
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Link Foto Google Drive</label>
+          <input type="url" id="edit_foto_url" name="foto_url" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          <span class="text-[10px] text-slate-400">Kosongkan untuk menghapus foto. File Drive harus dibagikan sebagai “Anyone with the link”.</span>
+        </div>
+
+        <div class="flex gap-2 pt-2">
+          <button type="button" onclick="closeEditModal()" class="w-1/2 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition">
+            Batal
+          </button>
+          <button type="submit" class="w-1/2 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl transition shadow-md">
+            Simpan Perubahan
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Script untuk Modal Edit (Menggunakan data-attribute agar aman dari Unterminated String Error) -->
+  <script is:inline>
+    document.addEventListener('DOMContentLoaded', () => {
+      const memberRowsContainer = document.getElementById('admin-member-rows');
+      const sortButtons = Array.from(document.querySelectorAll('[data-admin-sort]'));
+      const memberSearch = document.getElementById('admin-member-search');
+      const memberCount = document.getElementById('admin-member-count');
+      const noResultsRow = document.getElementById('admin-member-no-results');
+      const memberPageSize = document.getElementById('admin-member-page-size');
+      const memberPageLinks = document.getElementById('admin-member-page-links');
+      const memberPagePrevious = document.getElementById('admin-member-page-previous');
+      const memberPageNext = document.getElementById('admin-member-page-next');
+      let activeSort = 'name';
+      let activeDirection = 'asc';
+      let memberPage = 1;
+
+      const filterMembers = () => {
+        if (!memberRowsContainer) return;
+        const query = memberSearch?.value.trim().toLocaleLowerCase('id-ID') || '';
+        const rows = Array.from(memberRowsContainer.querySelectorAll('.admin-member-row'));
+        const matches = rows.filter((row) => (row.dataset.search || '').includes(query));
+        const pageSize = Number(memberPageSize?.value || 10);
+        const pageCount = Math.max(1, Math.ceil(matches.length / pageSize));
+        memberPage = Math.min(Math.max(1, memberPage), pageCount);
+        const start = (memberPage - 1) * pageSize;
+        const end = Math.min(start + pageSize, matches.length);
+        const pageRows = new Set(matches.slice(start, end));
+
+        rows.forEach((row) => row.classList.toggle('hidden', !pageRows.has(row)));
+
+        if (memberCount) {
+          memberCount.textContent = matches.length
+            ? `Menampilkan ${start + 1}-${end} dari ${matches.length} anggota`
+            : rows.length ? 'Tidak ada anggota yang cocok dengan pencarian' : 'Belum ada anggota';
+        }
+        noResultsRow?.classList.toggle('hidden', matches.length > 0 || rows.length === 0);
+        if (memberPagePrevious) memberPagePrevious.disabled = memberPage <= 1;
+        if (memberPageNext) memberPageNext.disabled = memberPage >= pageCount;
+
+        if (memberPageLinks) {
+          memberPageLinks.replaceChildren();
+          let pages;
+          if (pageCount <= 7) pages = Array.from({ length: pageCount }, (_, index) => index + 1);
+          else if (memberPage <= 4) pages = [1, 2, 3, 4, 5, '…', pageCount];
+          else if (memberPage >= pageCount - 3) pages = [1, '…', pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+          else pages = [1, '…', memberPage - 1, memberPage, memberPage + 1, '…', pageCount];
+
+          pages.forEach((pageNumber) => {
+            if (pageNumber === '…') {
+              const ellipsis = document.createElement('span');
+              ellipsis.className = 'px-1 text-xs text-slate-400';
+              ellipsis.textContent = '…';
+              memberPageLinks.append(ellipsis);
+              return;
+            }
+            const link = document.createElement('a');
+            link.href = '#admin-anggota-report';
+            link.textContent = String(pageNumber);
+            link.className = pageNumber === memberPage
+              ? 'rounded-md bg-blue-700 px-2.5 py-1 text-xs font-bold text-white'
+              : 'rounded-md px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50';
+            if (pageNumber === memberPage) link.setAttribute('aria-current', 'page');
+            link.addEventListener('click', (event) => {
+              event.preventDefault();
+              memberPage = pageNumber;
+              filterMembers();
+            });
+            memberPageLinks.append(link);
+          });
+        }
+      };
+
+      const sortMembers = (field, direction) => {
+        if (!memberRowsContainer) return;
+        activeSort = field;
+        activeDirection = direction;
+
+        const rows = Array.from(memberRowsContainer.querySelectorAll('.admin-member-row'));
+        rows.sort((left, right) => {
+          let leftValue = left.dataset[field] || '';
+          let rightValue = right.dataset[field] || '';
+
+          if (field === 'regu') {
+            const reguOrder = (Number(leftValue) || Number.MAX_SAFE_INTEGER) - (Number(rightValue) || Number.MAX_SAFE_INTEGER);
+            if (reguOrder !== 0) return direction === 'asc' ? reguOrder : -reguOrder;
+            leftValue = `${left.dataset.tempekan || ''} ${left.dataset.address || ''}`;
+            rightValue = `${right.dataset.tempekan || ''} ${right.dataset.address || ''}`;
+          }
+
+          const comparison = leftValue.localeCompare(rightValue, 'id', { sensitivity: 'base', numeric: true });
+          return direction === 'asc' ? comparison : -comparison;
+        });
+
+        const emptyRow = memberRowsContainer.querySelector(':scope > tr:not(.admin-member-row)');
+        rows.forEach((row) => memberRowsContainer.insertBefore(row, emptyRow));
+        memberPage = 1;
+
+        sortButtons.forEach((button) => {
+          const selected = button.dataset.adminSort === field;
+          const header = button.closest('th');
+          if (header) header.setAttribute('aria-sort', selected ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+          const indicator = button.querySelector('[data-admin-sort-indicator]');
+          if (indicator) indicator.textContent = selected ? (direction === 'asc' ? '↑' : '↓') : '↕';
+        });
+        filterMembers();
+      };
+
+      sortButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+          const field = button.dataset.adminSort;
+          if (!field) return;
+          const direction = activeSort === field && activeDirection === 'asc' ? 'desc' : 'asc';
+          sortMembers(field, direction);
+        });
+      });
+      sortMembers(activeSort, activeDirection);
+      memberSearch?.addEventListener('input', () => {
+        memberPage = 1;
+        filterMembers();
+      });
+      memberPageSize?.addEventListener('change', () => {
+        memberPage = 1;
+        filterMembers();
+      });
+      memberPagePrevious?.addEventListener('click', () => {
+        memberPage -= 1;
+        filterMembers();
+      });
+      memberPageNext?.addEventListener('click', () => {
+        memberPage += 1;
+        filterMembers();
+      });
+
+      document.querySelectorAll('[data-admin-pagination]').forEach((pagination) => {
+        const bodyId = pagination.dataset.adminPagination;
+        const body = bodyId ? document.getElementById(bodyId) : null;
+        const section = pagination.closest('section');
+        const search = section?.querySelector('[data-admin-table-search]');
+        const pageSizeSelect = pagination.querySelector('[data-admin-page-size]');
+        const pageSummary = pagination.querySelector('[data-admin-page-summary]');
+        const pageLinks = pagination.querySelector('[data-admin-page-links]');
+        const previousButton = pagination.querySelector('[data-admin-page-previous]');
+        const nextButton = pagination.querySelector('[data-admin-page-next]');
+        const tableSortButtons = Array.from(section?.querySelectorAll('[data-admin-table-sort]') || []);
+        if (!body || !pageSizeSelect || !pageLinks) return;
+
+        let currentPage = 1;
+        const initialSortButton = tableSortButtons.find((button) => button.closest('th')?.getAttribute('aria-sort') !== 'none') || tableSortButtons[0];
+        let activeSortField = initialSortButton?.dataset.adminTableSort || '';
+        let activeSortDirection = initialSortButton?.closest('th')?.getAttribute('aria-sort') === 'descending' ? 'desc' : 'asc';
+
+        const updateTable = () => {
+          const allRows = Array.from(body.querySelectorAll('.admin-page-row'));
+          const query = search?.value.trim().toLocaleLowerCase('id-ID') || '';
+          const matchingRows = allRows.filter((row) => (row.dataset.adminSearch || '').includes(query));
+          const pageSize = Number(pageSizeSelect.value || 10);
+          const totalPages = Math.max(1, Math.ceil(matchingRows.length / pageSize));
+          currentPage = Math.min(Math.max(1, currentPage), totalPages);
+          const start = (currentPage - 1) * pageSize;
+          const end = Math.min(start + pageSize, matchingRows.length);
+          const visibleRows = new Set(matchingRows.slice(start, end));
+          allRows.forEach((row) => row.classList.toggle('hidden', !visibleRows.has(row)));
+
+          let emptyRow = body.querySelector('[data-admin-no-results]');
+          if (!emptyRow) {
+            emptyRow = document.createElement('tr');
+            emptyRow.dataset.adminNoResults = 'true';
+            emptyRow.className = 'hidden';
+            const cell = document.createElement('td');
+            cell.colSpan = section?.querySelectorAll('thead th').length || 1;
+            cell.className = 'p-6 text-center text-slate-400';
+            cell.textContent = 'Tidak ada data yang cocok dengan pencarian.';
+            emptyRow.append(cell);
+            body.append(emptyRow);
+          }
+          emptyRow.classList.toggle('hidden', matchingRows.length > 0 || allRows.length === 0);
+          if (pageSummary) pageSummary.textContent = matchingRows.length
+            ? `Menampilkan ${start + 1}-${end} dari ${matchingRows.length} baris`
+            : allRows.length ? 'Tidak ada hasil yang cocok' : 'Tidak ada data';
+          if (previousButton) previousButton.disabled = currentPage <= 1;
+          if (nextButton) nextButton.disabled = currentPage >= totalPages;
+
+          let pages;
+          if (totalPages <= 7) pages = Array.from({ length: totalPages }, (_, index) => index + 1);
+          else if (currentPage <= 4) pages = [1, 2, 3, 4, 5, '…', totalPages];
+          else if (currentPage >= totalPages - 3) pages = [1, '…', totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+          else pages = [1, '…', currentPage - 1, currentPage, currentPage + 1, '…', totalPages];
+
+          pageLinks.replaceChildren();
+          pages.forEach((pageNumber) => {
+            if (pageNumber === '…') {
+              const ellipsis = document.createElement('span');
+              ellipsis.className = 'px-1 text-xs text-slate-400';
+              ellipsis.textContent = '…';
+              pageLinks.append(ellipsis);
+              return;
+            }
+            const link = document.createElement('a');
+            link.href = '#';
+            link.textContent = String(pageNumber);
+            link.setAttribute('aria-label', `Halaman ${pageNumber}`);
+            link.className = pageNumber === currentPage
+              ? 'rounded-md bg-blue-700 px-2.5 py-1 text-xs font-bold text-white'
+              : 'rounded-md px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50';
+            if (pageNumber === currentPage) link.setAttribute('aria-current', 'page');
+            link.addEventListener('click', (event) => {
+              event.preventDefault();
+              currentPage = pageNumber;
+              updateTable();
+            });
+            pageLinks.append(link);
+          });
+        };
+
+        tableSortButtons.forEach((button) => {
+          button.addEventListener('click', () => {
+            const field = button.dataset.adminTableSort;
+            if (!field) return;
+            const nextDirection = activeSortField === field && activeSortDirection === 'asc' ? 'desc' : 'asc';
+            const dataKey = field.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+            const rows = Array.from(body.querySelectorAll('.admin-page-row'));
+            const isNumeric = field.endsWith('amount');
+            rows.sort((left, right) => {
+              const leftValue = left.dataset[dataKey] || '';
+              const rightValue = right.dataset[dataKey] || '';
+              const compare = isNumeric
+                ? Number(leftValue) - Number(rightValue)
+                : leftValue.localeCompare(rightValue, 'id', { sensitivity: 'base', numeric: true });
+              return nextDirection === 'asc' ? compare : -compare;
+            });
+            const empty = body.querySelector('[data-admin-no-results]');
+            rows.forEach((row) => body.insertBefore(row, empty));
+            activeSortField = field;
+            activeSortDirection = nextDirection;
+            currentPage = 1;
+            tableSortButtons.forEach((sortButton) => {
+              const isActive = sortButton.dataset.adminTableSort === field;
+              const heading = sortButton.closest('th');
+              if (heading) heading.setAttribute('aria-sort', isActive ? (nextDirection === 'asc' ? 'ascending' : 'descending') : 'none');
+              const indicator = sortButton.querySelector('[data-admin-table-sort-indicator]');
+              if (indicator) indicator.textContent = isActive ? (nextDirection === 'asc' ? '↑' : '↓') : '↕';
+            });
+            updateTable();
+          });
+        });
+
+        search?.addEventListener('input', () => {
+          currentPage = 1;
+          updateTable();
+        });
+        pageSizeSelect.addEventListener('change', () => {
+          currentPage = 1;
+          updateTable();
+        });
+        previousButton?.addEventListener('click', () => {
+          currentPage -= 1;
+          updateTable();
+        });
+        nextButton?.addEventListener('click', () => {
+          currentPage += 1;
+          updateTable();
+        });
+        if (activeSortField) {
+          const dataKey = activeSortField.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+          const rows = Array.from(body.querySelectorAll('.admin-page-row'));
+          rows.sort((left, right) => {
+            const leftValue = left.dataset[dataKey] || '';
+            const rightValue = right.dataset[dataKey] || '';
+            const isNumeric = activeSortField.endsWith('amount');
+            const compare = isNumeric
+              ? Number(leftValue) - Number(rightValue)
+              : leftValue.localeCompare(rightValue, 'id', { sensitivity: 'base', numeric: true });
+            return activeSortDirection === 'asc' ? compare : -compare;
+          });
+          rows.forEach((row) => body.append(row));
+        }
+        updateTable();
+      });
+
+      document.querySelectorAll('.btn-edit').forEach(button => {
+        button.addEventListener('click', () => {
+          try {
+            const krama = JSON.parse(button.getAttribute('data-krama'));
+            
+            document.getElementById('edit_id').value = krama.id || '';
+            document.getElementById('edit_user_id').value = krama.user_id || '';
+            document.getElementById('edit_foto_url').value = krama.foto_url || '';
+            document.getElementById('edit_nama_lengkap').value = krama.nama_lengkap || '';
+            document.getElementById('edit_no_hp').value = krama.no_hp || '';
+            document.getElementById('edit_email').value = krama.email || '';
+            document.getElementById('edit_role').value = krama.role || 'KRAMA';
+            document.getElementById('edit_no_regu').value = krama.no_regu || '';
+            document.getElementById('edit_tempekan').value = krama.tempekan || '';
+            document.getElementById('edit_tanggal_lahir').value = krama.tanggal_lahir ? krama.tanggal_lahir.slice(0, 10) : '';
+            document.getElementById('edit_status_perkawinan').value = krama.status_perkawinan || '';
+            document.getElementById('edit_alamat').value = krama.alamat || '';
+            document.getElementById('edit_status_aktif').value = krama.status_aktif || 'AKTIF';
+            
+            document.getElementById('editModal').classList.remove('hidden');
+            document.getElementById('editModal').classList.add('flex');
+          } catch (e) {
+            console.error("Gagal memuat data edit krama:", e);
+          }
+        });
+      });
+    });
+
+    function closeEditModal() {
+      document.getElementById('editModal').classList.add('hidden');
+      document.getElementById('editModal').classList.remove('flex');
+    }
+  </script>
+</LayoutDashboard>

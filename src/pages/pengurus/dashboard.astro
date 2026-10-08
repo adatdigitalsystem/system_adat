@@ -1,0 +1,520 @@
+---
+import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
+import { supabase } from '../../lib/supabase';
+import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
+import { formatRupiah, labelStatusKeanggotaan } from '../../lib/utils';
+import PrintReportButton from '../../components/common/PrintReportButton.astro';
+
+const accessToken = Astro.cookies.get('sb-access-token')?.value || '';
+const { data: { user } } = await supabase.auth.getUser(accessToken);
+const { data: viewerProfile } = user
+  ? await supabase.from('anggota').select('role').eq('user_id', user.id).maybeSingle()
+  : { data: null };
+const dashboardRole = viewerProfile?.role || 'PENGURUS';
+
+const reportClient = createSupabaseAdminClient();
+const [{ data: listAnggota }, { data: listHistory }, { data: listPayments }, { data: listEvents }, { data: listCashTransactions }, { data: listDeposits }] = await Promise.all([
+  reportClient
+  .from('anggota')
+  .select('*')
+  .order('nama_lengkap', { ascending: true }),
+  reportClient
+  .from('tagihan_krama')
+  .select('*')
+  .order('created_at', { ascending: false }),
+  reportClient
+    .from('riwayat_pembayaran_cicilan')
+    .select('id, anggota_id, tagihan_krama_id, setoran_regu_id, nominal_bayar, tanggal_bayar, metode_pembayaran, keterangan, created_at')
+    .order('tanggal_bayar', { ascending: false }),
+  reportClient
+    .from('event_adat')
+    .select('id, nama_event, jenis_event, target_status_keanggotaan, tarif_default, tanggal_event, created_at')
+    .order('tanggal_event', { ascending: false }),
+  reportClient
+    .from('transaksi_kas')
+    .select('id, tanggal, arah, kategori, penerima, keterangan, nominal, metode_pembayaran, bukti_url, created_at')
+    .order('tanggal', { ascending: false })
+    .order('created_at', { ascending: false }),
+  reportClient
+    .from('setoran_regu')
+    .select('id, regu_id, kepala_regu_id, total_nominal, status_verifikasi, tanggal_verifikasi, keterangan, created_at, anggota!setoran_regu_kepala_regu_id_fkey(nama_lengkap), regu(nama_regu)')
+    .order('created_at', { ascending: false }),
+]);
+
+const totalAktif = listAnggota?.filter(a => !a.status_aktif || a.status_aktif === 'AKTIF').length || 0;
+const totalTidakAktif = listAnggota?.filter(a => a.status_aktif === 'TIDAK_AKTIF').length || 0;
+const anggotaById = new Map((listAnggota || []).map((anggota) => [anggota.id, anggota]));
+const statusBelumLunas = new Set(['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
+const getTimestamp = (date: string, fallback?: string | null) => {
+  const value = date || fallback?.split('T')[0] || '';
+  const parsed = Date.parse(`${value}T12:00:00`);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const paymentsByBill = new Map<string, number>();
+for (const payment of listPayments || []) {
+  if (!payment.tagihan_krama_id) continue;
+  paymentsByBill.set(payment.tagihan_krama_id, (paymentsByBill.get(payment.tagihan_krama_id) || 0) + Number(payment.nominal_bayar || 0));
+}
+
+const ledgerEntries: any[] = [];
+for (const bill of listHistory || []) {
+  const anggotaId = bill.anggota_id || bill.krama_id;
+  const anggota = anggotaById.get(anggotaId);
+  const date = bill.tanggal_kejadian || bill.created_at?.split('T')[0] || '';
+  const nominal = Number(bill.total_nominal ?? bill.nominal ?? 0);
+  const dibayar = Number(bill.jumlah_dibayar || 0);
+  ledgerEntries.push({
+    id: `tagihan-${bill.id}`,
+    anggotaId,
+    tanggal: date,
+    timestamp: getTimestamp(date, bill.created_at),
+    sequence: 0,
+    nomorBukti: `TAG-${bill.id.slice(0, 8).toUpperCase()}`,
+    namaAnggota: anggota?.nama_lengkap || 'Anggota tidak ditemukan',
+    statusKrama: anggota?.status_aktif || 'BELUM_DILENGKAPI',
+    keterangan: bill.keterangan || bill.jenis_tagihan || 'Tagihan kewajiban',
+    statusPembayaran: bill.status_bayar || 'BELUM_LUNAS',
+    debet: nominal,
+    kredit: 0,
+  });
+
+  const unitemizedCredit = Math.max(0, dibayar - (paymentsByBill.get(bill.id) || 0));
+  if (unitemizedCredit > 0) {
+    ledgerEntries.push({
+      id: `rekonsiliasi-${bill.id}`,
+      anggotaId,
+      tanggal: date,
+      timestamp: getTimestamp(date, bill.created_at),
+      sequence: 1,
+      nomorBukti: `SAL-${bill.id.slice(0, 8).toUpperCase()}`,
+      namaAnggota: anggota?.nama_lengkap || 'Anggota tidak ditemukan',
+      statusKrama: anggota?.status_aktif || 'BELUM_DILENGKAPI',
+      keterangan: `Saldo pembayaran lama; rincian tidak tersedia (${bill.keterangan || 'tagihan'})`,
+      statusPembayaran: 'REKONSILIASI',
+      debet: 0,
+      kredit: unitemizedCredit,
+    });
+  }
+}
+
+for (const payment of listPayments || []) {
+  const anggota = anggotaById.get(payment.anggota_id);
+  const date = payment.tanggal_bayar?.split('T')[0] || payment.created_at?.split('T')[0] || '';
+  const parsedTimestamp = payment.tanggal_bayar ? Date.parse(payment.tanggal_bayar) : getTimestamp(date);
+  ledgerEntries.push({
+    id: `pembayaran-${payment.id}`,
+    anggotaId: payment.anggota_id,
+    tanggal: date,
+    timestamp: Number.isNaN(parsedTimestamp) ? 0 : parsedTimestamp,
+    sequence: 2,
+    nomorBukti: `BYR-${payment.id.slice(0, 8).toUpperCase()}`,
+    namaAnggota: anggota?.nama_lengkap || 'Anggota tidak ditemukan',
+    statusKrama: anggota?.status_aktif || 'BELUM_DILENGKAPI',
+    keterangan: payment.keterangan || `Pembayaran ${payment.metode_pembayaran || 'diterima'}`,
+    statusPembayaran: 'PEMBAYARAN DICATAT',
+    debet: 0,
+    kredit: Number(payment.nominal_bayar || 0),
+  });
+}
+
+const chronologicalLedger = ledgerEntries.sort((left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence || left.id.localeCompare(right.id));
+const balanceByMember = new Map<string, number>();
+for (const entry of chronologicalLedger) {
+  const balance = (balanceByMember.get(entry.anggotaId) || 0) + entry.debet - entry.kredit;
+  entry.saldo = balance;
+  balanceByMember.set(entry.anggotaId, balance);
+}
+const riwayat = [...chronologicalLedger].sort((left, right) => right.timestamp - left.timestamp || right.sequence - left.sequence || right.id.localeCompare(left.id));
+const totalDebet = riwayat.reduce((total, item) => total + item.debet, 0);
+const totalKredit = riwayat.reduce((total, item) => total + item.kredit, 0);
+const totalSisa = [...balanceByMember.values()].reduce((total, balance) => total + balance, 0);
+const selisihSaldoLegacy = riwayat.filter((item) => item.statusPembayaran === 'REKONSILIASI').reduce((total, item) => total + item.kredit, 0);
+
+const cashMovements: any[] = [];
+for (const deposit of listDeposits || []) {
+  const reversedByAdmin = (deposit.keterangan || '').includes('[PEMBALIKAN ADMIN]');
+  if (deposit.status_verifikasi !== 'VERIFIED' && !reversedByAdmin) continue;
+  const depositDate = (deposit.status_verifikasi === 'VERIFIED' ? deposit.tanggal_verifikasi : deposit.created_at)?.split('T')[0] || '';
+  const amount = Number(deposit.total_nominal || 0);
+  const kepala = Array.isArray(deposit.anggota) ? deposit.anggota[0] : deposit.anggota;
+  const regu = Array.isArray(deposit.regu) ? deposit.regu[0] : deposit.regu;
+  cashMovements.push({
+    id: `setoran-${deposit.id}`, tanggal: depositDate, timestamp: getTimestamp(depositDate, deposit.created_at), sequence: 0,
+    nomorBukti: `STR-${deposit.id.slice(0, 8).toUpperCase()}`, kategori: 'Setoran Regu', pihak: kepala?.nama_lengkap || regu?.nama_regu || 'Regu',
+    keterangan: `Setoran ${regu?.nama_regu || 'regu'}`, debet: amount, kredit: 0, metode: 'Setoran terverifikasi',
+  });
+  if (reversedByAdmin) {
+    const reversalDate = deposit.tanggal_verifikasi?.split('T')[0] || depositDate;
+    cashMovements.push({
+      id: `reversal-${deposit.id}`, tanggal: reversalDate, timestamp: getTimestamp(reversalDate, deposit.tanggal_verifikasi), sequence: 2,
+      nomorBukti: `REV-${deposit.id.slice(0, 8).toUpperCase()}`, kategori: 'Pembalikan Setoran', pihak: kepala?.nama_lengkap || regu?.nama_regu || 'Regu',
+      keterangan: 'Pembalikan setoran terverifikasi', debet: 0, kredit: amount, metode: '-',
+    });
+  }
+}
+
+for (const payment of listPayments || []) {
+  if (payment.metode_pembayaran !== 'CASH_BENDAHARA' || payment.setoran_regu_id) continue;
+  const date = payment.tanggal_bayar?.split('T')[0] || payment.created_at?.split('T')[0] || '';
+  const parsedTimestamp = payment.tanggal_bayar ? Date.parse(payment.tanggal_bayar) : getTimestamp(date);
+  cashMovements.push({
+    id: `pembayaran-langsung-${payment.id}`, tanggal: date, timestamp: Number.isNaN(parsedTimestamp) ? 0 : parsedTimestamp, sequence: 1,
+    nomorBukti: `BYR-${payment.id.slice(0, 8).toUpperCase()}`, kategori: 'Pembayaran Langsung Krama',
+    pihak: anggotaById.get(payment.anggota_id)?.nama_lengkap || 'Anggota', keterangan: payment.keterangan || 'Pembayaran tunai diterima Bendahara',
+    debet: Number(payment.nominal_bayar || 0), kredit: 0, metode: payment.metode_pembayaran,
+  });
+}
+
+for (const transaction of listCashTransactions || []) {
+  const isOpening = transaction.arah === 'SALDO_AWAL';
+  const isCashIn = transaction.arah === 'MASUK' || isOpening;
+  cashMovements.push({
+    id: `kas-${transaction.id}`, tanggal: transaction.tanggal, timestamp: getTimestamp(transaction.tanggal, transaction.created_at), sequence: isOpening ? -1 : 2,
+    nomorBukti: `${isOpening ? 'SAL' : isCashIn ? 'MSK' : 'KLR'}-${transaction.id.slice(0, 8).toUpperCase()}`,
+    kategori: transaction.kategori, pihak: transaction.penerima, keterangan: transaction.keterangan,
+    debet: isCashIn ? Number(transaction.nominal || 0) : 0, kredit: isCashIn ? 0 : Number(transaction.nominal || 0),
+    metode: transaction.metode_pembayaran, buktiUrl: transaction.bukti_url, arah: transaction.arah,
+  });
+}
+
+const openingBalance = cashMovements.find((entry) => entry.arah === 'SALDO_AWAL');
+const cashPeriod = openingBalance ? cashMovements.filter((entry) => entry.timestamp >= openingBalance.timestamp) : cashMovements;
+const chronologicalCash = cashPeriod.sort((left, right) => left.timestamp - right.timestamp || left.sequence - right.sequence || left.id.localeCompare(right.id));
+let currentCashBalance = 0;
+for (const entry of chronologicalCash) {
+  currentCashBalance += entry.debet - entry.kredit;
+  entry.saldo = currentCashBalance;
+}
+const bukuKas = [...chronologicalCash].sort((left, right) => right.timestamp - left.timestamp || right.sequence - left.sequence || right.id.localeCompare(left.id));
+const totalKasMasuk = cashPeriod.filter((entry) => entry.arah !== 'SALDO_AWAL').reduce((total, entry) => total + entry.debet, 0);
+const totalKasKeluar = cashPeriod.reduce((total, entry) => total + entry.kredit, 0);
+const labelKategoriKas = (category: string) => ({
+  BANTUAN_DUKA: 'Bantuan keluarga berduka',
+  BANTUAN_PERNIKAHAN: 'Pembayaran kepada mempelai',
+  OPERASIONAL: 'Operasional banjar',
+  LAINNYA: 'Pengeluaran lainnya',
+  PEMASUKAN_LAIN: 'Pemasukan lain',
+  SUMBANGAN: 'Sumbangan',
+  PENGEMBALIAN_DANA: 'Pengembalian dana',
+  SALDO_AWAL_KAS: 'Saldo awal kas',
+  'Setoran Regu': 'Setoran regu',
+  'Pembayaran Langsung Krama': 'Pembayaran langsung krama',
+  'Pembalikan Setoran': 'Pembalikan setoran',
+}[category] || category);
+
+---
+
+<LayoutDashboard title="Dashboard Pengurus (View-Only) - Banjar Adat" role={dashboardRole}>
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
+    
+    <!-- Header Pengurus -->
+    <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
+      <div>
+        <span class="text-xs font-bold px-3 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-full">
+          Pengurus Banjar (Mode Pantau / View-Only)
+        </span>
+        <h1 class="text-xl md:text-2xl font-black mt-2">Monitoring Keseluruhan Data & Keuangan Banjar</h1>
+      </div>
+      <div class="text-xs text-slate-400 space-x-3">
+        <span>{labelStatusKeanggotaan('AKTIF')}: <strong class="text-emerald-400">{totalAktif}</strong></span>
+        <span>{labelStatusKeanggotaan('TIDAK_AKTIF')}: <strong class="text-red-400">{totalTidakAktif}</strong></span>
+      </div>
+    </div>
+
+    <section class="flex flex-col gap-5 rounded-xl border border-slate-200 bg-white p-6 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <p class="text-xs font-bold uppercase text-blue-700">Direktori Banjar</p>
+        <h2 class="mt-1 text-lg font-black text-slate-900">Seluruh Anggota Krama</h2>
+        <p class="mt-1 text-sm text-slate-500">Lihat foto, informasi profil, dan saldo kewajiban seluruh anggota.</p>
+        <p class="mt-3 text-xs font-semibold text-slate-600">{listAnggota?.length || 0} anggota · {totalAktif} Ngayah · {formatRupiah(totalSisa)} sisa kewajiban</p>
+      </div>
+      <a href="/daftar-krama" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700">
+        Buka Direktori Krama <span aria-hidden="true">&rarr;</span>
+      </a>
+    </section>
+
+    <section id="pengurus-event-report" data-report-table="events" class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-xs font-bold uppercase text-amber-700">Tarif & Kewajiban</p>
+          <h2 class="mt-1 text-base font-bold text-slate-900">Daftar Master Tarif & Event Adat Aktif</h2>
+          <p class="mt-1 text-xs text-slate-500">Informasi event dan cakupan anggota yang ditagih. Mode lihat saja.</p>
+        </div>
+        <PrintReportButton targetId="pengurus-event-report" title="Daftar Master Tarif dan Event Adat" />
+      </div>
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Cari event / jenis / sasaran</span><input type="search" data-report-search placeholder="Nama event, jenis, sasaran..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <p data-report-summary class="text-xs text-slate-500 sm:pb-2" aria-live="polite"></p>
+      </div>
+      <div class="overflow-x-auto rounded-lg border border-slate-200">
+        <table class="w-full min-w-180 text-left text-xs text-slate-600">
+          <thead class="bg-slate-50 text-[10px] uppercase text-slate-500">
+            <tr>
+              <th class="p-3" aria-sort="ascending"><button type="button" data-sort-field="name" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Nama Event <span data-sort-indicator>↑</span></button></th>
+              <th class="p-3" aria-sort="none"><button type="button" data-sort-field="type" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Jenis <span data-sort-indicator>↕</span></button></th>
+              <th class="p-3" aria-sort="none"><button type="button" data-sort-field="target" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Dikenakan Kepada <span data-sort-indicator>↕</span></button></th>
+              <th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="amount" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tarif Default <span data-sort-indicator>↕</span></button></th>
+              <th class="p-3 text-center" aria-sort="none"><button type="button" data-sort-field="date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tanggal Pelaksanaan <span data-sort-indicator>↕</span></button></th>
+            </tr>
+          </thead>
+          <tbody data-report-body class="divide-y divide-slate-100">
+            {listEvents?.length ? listEvents.map((event) => (
+              <tr class="report-row hover:bg-slate-50" data-search={`${event.nama_event} ${event.jenis_event} ${event.target_status_keanggotaan}`.toLocaleLowerCase('id-ID')} data-name={event.nama_event || ''} data-type={event.jenis_event || ''} data-target={event.target_status_keanggotaan || ''} data-amount={Number(event.tarif_default || 0)} data-date={event.tanggal_event || ''}>
+                <td class="p-3 font-semibold text-slate-900">{event.nama_event}</td>
+                <td class="p-3"><span class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold">{event.jenis_event}</span></td>
+                <td class="p-3">{event.target_status_keanggotaan === 'TIDAK_AKTIF' ? labelStatusKeanggotaan('TIDAK_AKTIF') : event.target_status_keanggotaan === 'AKTIF' ? labelStatusKeanggotaan('AKTIF') : 'Ngayah & Numbas Ayahan'}</td>
+                <td class="whitespace-nowrap p-3 text-right font-bold text-slate-900">{formatRupiah(Number(event.tarif_default || 0))}</td>
+                <td class="whitespace-nowrap p-3 text-center">{event.tanggal_event || '-'}</td>
+              </tr>
+            )) : <tr><td colspan="5" class="p-7 text-center text-slate-400">Belum ada master tarif atau event adat.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+        <div class="flex items-center justify-end gap-2"><button type="button" data-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-page-links class="flex items-center gap-1" aria-label="Halaman daftar event"></nav><button type="button" data-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+      </div>
+    </section>
+
+    <section id="pengurus-cash-report" data-report-table="cash" class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-xs font-bold uppercase text-slate-500">Kas Banjar</p>
+          <h2 class="mt-1 text-base font-bold text-slate-900">Buku Kas Masuk & Keluar</h2>
+          <p class="mt-1 text-xs text-slate-500">Hanya transaksi terverifikasi dan tercatat; tidak ada kontrol posting pada tampilan Pengurus.</p>
+          {openingBalance ? (
+            <p class="mt-1 text-[11px] text-amber-800">Saldo dibuka {formatRupiah(openingBalance.debet)} pada {openingBalance.tanggal}; transaksi sebelumnya tidak dihitung ke periode ini.</p>
+          ) : (
+            <p class="mt-1 text-[11px] text-amber-800">Belum ada saldo pembuka; saldo hanya mencakup transaksi kas yang tercatat di sistem.</p>
+          )}
+        </div>
+        <PrintReportButton targetId="pengurus-cash-report" title="Buku Kas Banjar" />
+      </div>
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Cari buku kas</span><input type="search" data-report-search placeholder="Kategori, pihak, keterangan, bukti..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <p data-report-summary class="text-xs text-slate-500 sm:pb-2" aria-live="polite"></p>
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4"><p class="text-xs text-emerald-800">Total Kas Masuk</p><p class="mt-1 text-lg font-black text-emerald-950">{formatRupiah(totalKasMasuk)}</p></div>
+        <div class="rounded-lg border border-red-200 bg-red-50 p-4"><p class="text-xs text-red-800">Total Kas Keluar</p><p class="mt-1 text-lg font-black text-red-950">{formatRupiah(totalKasKeluar)}</p></div>
+        <div class="rounded-lg border border-slate-300 bg-slate-50 p-4"><p class="text-xs text-slate-600">Saldo Kas Berjalan</p><p class="mt-1 text-lg font-black text-slate-950">{formatRupiah(currentCashBalance)}</p></div>
+      </div>
+      <div class="max-h-136 overflow-auto rounded-lg border border-slate-200">
+        <table class="w-full min-w-240 text-left text-xs text-slate-600">
+          <thead class="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase text-slate-500">
+            <tr><th class="p-3" aria-sort="descending"><button type="button" data-sort-field="date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tanggal <span data-sort-indicator>↓</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="reference" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">No. Bukti <span data-sort-indicator>↕</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="category" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Kategori / Pihak <span data-sort-indicator>↕</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="description" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Keterangan <span data-sort-indicator>↕</span></button></th><th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="debit" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Debet Kas <span data-sort-indicator>↕</span></button></th><th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="credit" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Kredit Kas <span data-sort-indicator>↕</span></button></th><th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="balance" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Saldo <span data-sort-indicator>↕</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="method" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Metode / Bukti <span data-sort-indicator>↕</span></button></th></tr>
+          </thead>
+          <tbody data-report-body class="divide-y divide-slate-100">
+            {bukuKas.length ? bukuKas.map((entry) => (
+              <tr class="report-row hover:bg-slate-50" data-search={`${entry.nomorBukti} ${entry.kategori} ${entry.pihak} ${entry.keterangan} ${entry.metode || ''} ${entry.buktiUrl || ''}`.toLocaleLowerCase('id-ID')} data-date={entry.tanggal || ''} data-reference={entry.nomorBukti || ''} data-category={`${entry.kategori} ${entry.pihak}`} data-description={entry.keterangan || ''} data-debit={entry.debet} data-credit={entry.kredit} data-balance={entry.saldo} data-method={`${entry.metode || ''} ${entry.buktiUrl || ''}`}>
+                <td class="whitespace-nowrap p-3">{entry.tanggal || '-'}</td>
+                <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">{entry.nomorBukti}</td>
+                <td class="p-3"><p class={`font-semibold ${entry.kredit > 0 ? 'text-red-800' : 'text-emerald-800'}`}>{labelKategoriKas(entry.kategori)}</p><p class="mt-1 text-slate-500">{entry.pihak}</p></td>
+                <td class="max-w-sm whitespace-pre-wrap p-3">{entry.keterangan}</td>
+                <td class="whitespace-nowrap p-3 text-right font-semibold text-emerald-800">{entry.debet > 0 ? formatRupiah(entry.debet) : '-'}</td>
+                <td class="whitespace-nowrap p-3 text-right font-semibold text-red-800">{entry.kredit > 0 ? formatRupiah(entry.kredit) : '-'}</td>
+                <td class={`whitespace-nowrap p-3 text-right font-bold ${entry.saldo < 0 ? 'text-red-800' : 'text-slate-900'}`}>{formatRupiah(entry.saldo)}</td>
+                <td class="whitespace-nowrap p-3"><span>{entry.metode || (entry.arah === 'SALDO_AWAL' ? 'Saldo pembuka' : '-')}</span>{entry.buktiUrl && <a href={entry.buktiUrl} target="_blank" rel="noreferrer" class="ml-2 font-semibold text-blue-700 hover:underline">Bukti</a>}</td>
+              </tr>
+            )) : <tr><td colspan="8" class="p-7 text-center text-slate-400">Belum ada transaksi kas masuk atau keluar.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+        <div class="flex items-center justify-end gap-2"><button type="button" data-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-page-links class="flex items-center gap-1" aria-label="Halaman buku kas"></nav><button type="button" data-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+      </div>
+    </section>
+
+    <section id="pengurus-ledger-report" data-report-table="ledger" class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <p class="text-xs font-bold uppercase text-blue-700">Kewajiban Anggota</p>
+          <h2 class="mt-1 text-base font-bold text-slate-900">Buku Besar Kewajiban Krama</h2>
+          <p class="mt-1 text-xs text-slate-500">Tagihan sebagai debet, pembayaran sebagai kredit, saldo berjalan per krama. Mode lihat saja.</p>
+        </div>
+        <PrintReportButton targetId="pengurus-ledger-report" title="Buku Besar Kewajiban Krama" />
+      </div>
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div class="rounded-lg border border-blue-200 bg-blue-50 p-4"><p class="text-xs text-blue-800">Total Debet Tagihan</p><p class="mt-1 text-lg font-black text-blue-950">{formatRupiah(totalDebet)}</p></div>
+        <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4"><p class="text-xs text-emerald-800">Total Kredit Pembayaran</p><p class="mt-1 text-lg font-black text-emerald-950">{formatRupiah(totalKredit)}</p></div>
+        <div class="rounded-lg border border-amber-200 bg-amber-50 p-4"><p class="text-xs text-amber-800">Saldo Piutang Krama</p><p class="mt-1 text-lg font-black text-amber-950">{formatRupiah(totalSisa)}</p></div>
+      </div>
+      {selisihSaldoLegacy > 0 && <p class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">Termasuk {formatRupiah(selisihSaldoLegacy)} saldo pembayaran lama tanpa rincian tanggal/transaksi, ditampilkan sebagai kredit rekonsiliasi.</p>}
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Cari buku besar</span><input type="search" data-report-search placeholder="Nama krama, bukti, keterangan, status..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <p data-report-summary class="text-xs text-slate-500 sm:pb-2" aria-live="polite"></p>
+      </div>
+      <div class="overflow-x-auto rounded-lg border border-slate-200">
+        <table class="w-full min-w-240 text-left text-xs text-slate-600">
+          <thead class="bg-slate-50 text-[10px] uppercase text-slate-500"><tr><th class="p-3" aria-sort="descending"><button type="button" data-sort-field="date" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Tanggal <span data-sort-indicator>↓</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="reference" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">No. Bukti <span data-sort-indicator>↕</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="member" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Nama Krama <span data-sort-indicator>↕</span></button></th><th class="p-3" aria-sort="none"><button type="button" data-sort-field="description" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Keterangan <span data-sort-indicator>↕</span></button></th><th class="p-3 text-center" aria-sort="none"><button type="button" data-sort-field="member-status" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Status Krama <span data-sort-indicator>↕</span></button></th><th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="debit" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Debet <span data-sort-indicator>↕</span></button></th><th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="credit" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Kredit <span data-sort-indicator>↕</span></button></th><th class="p-3 text-right" aria-sort="none"><button type="button" data-sort-field="balance" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Saldo <span data-sort-indicator>↕</span></button></th><th class="p-3 text-center" aria-sort="none"><button type="button" data-sort-field="payment-status" class="inline-flex items-center gap-1 font-bold hover:text-slate-900">Status Pembayaran <span data-sort-indicator>↕</span></button></th></tr></thead>
+          <tbody data-report-body class="divide-y divide-slate-100">
+            {riwayat.length ? riwayat.map((entry) => (
+              <tr class="report-row hover:bg-slate-50" data-search={`${entry.nomorBukti} ${entry.namaAnggota} ${entry.keterangan} ${entry.statusKrama} ${entry.statusPembayaran}`.toLocaleLowerCase('id-ID')} data-date={entry.tanggal || ''} data-reference={entry.nomorBukti || ''} data-member={entry.namaAnggota || ''} data-description={entry.keterangan || ''} data-member-status={entry.statusKrama || ''} data-debit={entry.debet} data-credit={entry.kredit} data-balance={entry.saldo} data-payment-status={entry.statusPembayaran || ''}>
+                <td class="whitespace-nowrap p-3">{entry.tanggal || '-'}</td>
+                <td class="whitespace-nowrap p-3 font-mono text-[10px]">{entry.nomorBukti}</td>
+                <td class="whitespace-nowrap p-3 font-semibold text-slate-900">{entry.anggotaId ? <a href={`/krama/detail?id=${entry.anggotaId}`} class="text-blue-700 hover:underline">{entry.namaAnggota}</a> : entry.namaAnggota}</td>
+                <td class="min-w-64 p-3"><span class={`mr-2 inline-block rounded-full px-2 py-0.5 text-[9px] font-bold ${entry.tipe === 'TAGIHAN' ? 'bg-blue-100 text-blue-800' : entry.tipe === 'PEMBAYARAN' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-900'}`}>{entry.tipe === 'TAGIHAN' ? 'Tagihan' : entry.tipe === 'PEMBAYARAN' ? 'Pembayaran' : 'Rekonsiliasi'}</span>{entry.keterangan}</td>
+                <td class="p-3 text-center"><span class="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-bold text-slate-700">{labelStatusKeanggotaan(entry.statusKrama)}</span></td>
+                <td class="whitespace-nowrap p-3 text-right">{entry.debet > 0 ? formatRupiah(entry.debet) : '-'}</td>
+                <td class="whitespace-nowrap p-3 text-right text-emerald-800">{entry.kredit > 0 ? formatRupiah(entry.kredit) : '-'}</td>
+                <td class="whitespace-nowrap p-3 text-right font-bold">{formatRupiah(entry.saldo)}</td>
+                <td class="p-3 text-center">{entry.statusPembayaran}</td>
+              </tr>
+            )) : <tr><td colspan="9" class="p-7 text-center text-slate-400">Belum ada riwayat kewajiban krama.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <label class="text-xs font-semibold text-slate-600">Baris per halaman <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+        <div class="flex items-center justify-end gap-2"><button type="button" data-page-previous class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&larr;</button><nav data-page-links class="flex items-center gap-1" aria-label="Halaman buku besar kewajiban"></nav><button type="button" data-page-next class="rounded-lg border border-slate-300 px-2.5 py-1.5 text-xs disabled:opacity-40">&rarr;</button></div>
+      </div>
+    </section>
+
+  </div>
+</LayoutDashboard>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-report-table]').forEach((report) => {
+    const tableBody = report.querySelector<HTMLTableSectionElement>('[data-report-body]');
+    const searchInput = report.querySelector<HTMLInputElement>('[data-report-search]');
+    const summary = report.querySelector<HTMLElement>('[data-report-summary]');
+    const pageSizeSelect = report.querySelector<HTMLSelectElement>('[data-page-size]');
+    const pageLinks = report.querySelector<HTMLElement>('[data-page-links]');
+    const previousButton = report.querySelector<HTMLButtonElement>('[data-page-previous]');
+    const nextButton = report.querySelector<HTMLButtonElement>('[data-page-next]');
+    const sortButtons = Array.from(report.querySelectorAll<HTMLButtonElement>('[data-sort-field]'));
+    if (!tableBody || !pageSizeSelect || !pageLinks) return;
+
+    let currentPage = 1;
+    const initialSortButton = sortButtons.find((button) => button.closest('th')?.getAttribute('aria-sort') !== 'none') || sortButtons[0];
+    let activeSortField = initialSortButton?.dataset.sortField || '';
+    let activeSortDirection: 'asc' | 'desc' = initialSortButton?.closest('th')?.getAttribute('aria-sort') === 'descending' ? 'desc' : 'asc';
+
+    const update = () => {
+      const allRows = Array.from(tableBody.querySelectorAll<HTMLTableRowElement>('.report-row'));
+      const query = searchInput?.value.trim().toLocaleLowerCase('id-ID') || '';
+      const matchingRows = allRows.filter((row) => (row.dataset.search || '').includes(query));
+      const pageSize = Number(pageSizeSelect.value || 10);
+      const pageCount = Math.max(1, Math.ceil(matchingRows.length / pageSize));
+      currentPage = Math.min(Math.max(1, currentPage), pageCount);
+      const start = (currentPage - 1) * pageSize;
+      const end = Math.min(start + pageSize, matchingRows.length);
+      const visibleRows = new Set(matchingRows.slice(start, end));
+
+      allRows.forEach((row) => {
+        const isVisible = visibleRows.has(row);
+        row.classList.toggle('hidden', !isVisible);
+        if (isVisible) row.removeAttribute('data-report-page-hidden');
+        else row.setAttribute('data-report-page-hidden', 'true');
+      });
+
+      let noResultsRow = tableBody.querySelector<HTMLTableRowElement>('[data-report-no-results]');
+      if (!noResultsRow) {
+        noResultsRow = document.createElement('tr');
+        noResultsRow.dataset.reportNoResults = 'true';
+        noResultsRow.className = 'hidden';
+        const cell = document.createElement('td');
+        cell.colSpan = report.querySelectorAll('thead th').length || 1;
+        cell.className = 'p-7 text-center text-slate-400';
+        cell.textContent = 'Tidak ada baris yang cocok dengan pencarian.';
+        noResultsRow.append(cell);
+        tableBody.append(noResultsRow);
+      }
+      noResultsRow.classList.toggle('hidden', matchingRows.length > 0 || allRows.length === 0);
+      if (summary) summary.textContent = matchingRows.length
+        ? `Menampilkan ${start + 1}-${end} dari ${matchingRows.length} baris`
+        : allRows.length ? 'Tidak ada hasil yang cocok' : 'Tidak ada data';
+
+      if (previousButton) previousButton.disabled = currentPage <= 1;
+      if (nextButton) nextButton.disabled = currentPage >= pageCount;
+
+      let pages: Array<number | 'ellipsis'>;
+      if (pageCount <= 7) pages = Array.from({ length: pageCount }, (_, index) => index + 1);
+      else if (currentPage <= 4) pages = [1, 2, 3, 4, 5, 'ellipsis', pageCount];
+      else if (currentPage >= pageCount - 3) pages = [1, 'ellipsis', pageCount - 4, pageCount - 3, pageCount - 2, pageCount - 1, pageCount];
+      else pages = [1, 'ellipsis', currentPage - 1, currentPage, currentPage + 1, 'ellipsis', pageCount];
+
+      pageLinks.replaceChildren();
+      pages.forEach((pageNumber) => {
+        if (pageNumber === 'ellipsis') {
+          const ellipsis = document.createElement('span');
+          ellipsis.className = 'px-1 text-xs text-slate-400';
+          ellipsis.textContent = '…';
+          pageLinks.append(ellipsis);
+          return;
+        }
+
+        const link = document.createElement('a');
+        link.href = '#';
+        link.textContent = String(pageNumber);
+        link.setAttribute('aria-label', `Halaman ${pageNumber}`);
+        link.className = pageNumber === currentPage
+          ? 'rounded-md bg-blue-700 px-2.5 py-1 text-xs font-bold text-white'
+          : 'rounded-md px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50 hover:underline';
+        if (pageNumber === currentPage) link.setAttribute('aria-current', 'page');
+        link.addEventListener('click', (event) => {
+          event.preventDefault();
+          currentPage = pageNumber;
+          update();
+        });
+        pageLinks.append(link);
+      });
+    };
+
+    const sortRows = (field: string, direction: 'asc' | 'desc') => {
+      const rows = Array.from(tableBody.querySelectorAll<HTMLTableRowElement>('.report-row'));
+      const numericFields = new Set(['amount', 'debit', 'credit', 'balance']);
+      const dataKey = field.replace(/-([a-z])/g, (_, letter: string) => letter.toUpperCase());
+      rows.sort((left, right) => {
+        const leftValue = left.dataset[dataKey] || '';
+        const rightValue = right.dataset[dataKey] || '';
+        const comparison = numericFields.has(field)
+          ? Number(leftValue) - Number(rightValue)
+          : leftValue.localeCompare(rightValue, 'id', { sensitivity: 'base', numeric: true });
+        return direction === 'asc' ? comparison : -comparison;
+      });
+      rows.forEach((row) => tableBody.append(row));
+      activeSortField = field;
+      activeSortDirection = direction;
+      currentPage = 1;
+      sortButtons.forEach((button) => {
+        const selected = button.dataset.sortField === field;
+        const header = button.closest('th');
+        if (header) header.setAttribute('aria-sort', selected ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+        const indicator = button.querySelector<HTMLElement>('[data-sort-indicator]');
+        if (indicator) indicator.textContent = selected ? (direction === 'asc' ? '↑' : '↓') : '↕';
+      });
+      update();
+    };
+
+    searchInput?.addEventListener('input', () => {
+      currentPage = 1;
+      update();
+    });
+    pageSizeSelect.addEventListener('change', () => {
+      currentPage = 1;
+      update();
+    });
+    previousButton?.addEventListener('click', () => {
+      currentPage -= 1;
+      update();
+    });
+    nextButton?.addEventListener('click', () => {
+      currentPage += 1;
+      update();
+    });
+    sortButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const field = button.dataset.sortField;
+        if (!field) return;
+        const direction = activeSortField === field && activeSortDirection === 'asc' ? 'desc' : 'asc';
+        sortRows(field, direction);
+      });
+    });
+
+    if (initialSortButton?.dataset.sortField) sortRows(activeSortField, activeSortDirection);
+    else update();
+  });
+</script>

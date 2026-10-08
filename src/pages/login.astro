@@ -1,0 +1,63 @@
+---
+import LayoutMain from '../layouts/LayoutMain.astro';
+
+const errorMessage = Astro.url.searchParams.get('error') || '';
+---
+
+<LayoutMain title="Login - Portal Krama Banjar">
+  <div class="min-h-screen flex items-center justify-center px-4 bg-slate-950">
+    <div class="max-w-md w-full bg-slate-900 p-8 rounded-3xl shadow-2xl border border-slate-800 space-y-6">
+      
+      <div class="text-center space-y-2">
+        <span class="text-xs font-bold px-3 py-1 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-full">
+          Portal Krama Banjar Adat
+        </span>
+        <h1 class="text-xl font-black text-white">Masuk ke Akun Anda</h1>
+        <p class="text-xs text-slate-400">Masukkan Nomor WhatsApp/HP atau Email Anda.</p>
+      </div>
+
+      {errorMessage && (
+        <div class="p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold rounded-xl text-center wrap-break-word">
+          {errorMessage}
+        </div>
+      )}
+
+      <form method="POST" action="/api/auth/login" class="space-y-4">
+        
+        <div>
+          <label class="block text-[11px] font-bold text-slate-400 uppercase mb-1">Nomor WhatsApp / HP / Email</label>
+          <input 
+            type="text" 
+            name="identifier" 
+            required 
+            placeholder="Contoh: 08123456789 atau email@domain.com" 
+            class="w-full text-xs p-3 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500" 
+          />
+        </div>
+
+        <div>
+          <label class="block text-[11px] font-bold text-slate-400 uppercase mb-1">Password</label>
+          <input 
+            type="password" 
+            name="password" 
+            required 
+            placeholder="••••••••" 
+            class="w-full text-xs p-3 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500" 
+          />
+        </div>
+
+        <button 
+          type="submit" 
+          class="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl transition shadow-lg shadow-blue-600/20"
+        >
+          Masuk Sekarang
+        </button>
+      </form>
+
+      <div class="text-center text-[11px] text-slate-500">
+        Butuh bantuan akses? Hubungi Admin Banjar.
+      </div>
+
+    </div>
+  </div>
+</LayoutMain>
