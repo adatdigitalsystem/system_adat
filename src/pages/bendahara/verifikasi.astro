@@ -6,7 +6,7 @@ import { labelStatusKeanggotaan } from '../../lib/utils';
 import PrintReportButton from '../../components/common/PrintReportButton.astro';
 
 let errorMessage = '';
-let successMessage = '';
+let successMessage = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 const formatRupiah = (val: number) =>
   new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val || 0);
 const isValidDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00`));
@@ -234,7 +234,6 @@ if (Astro.request.method === 'POST') {
       const tanggal_kejadian = formData.get('tanggal_kejadian') || new Date().toISOString().split('T')[0];
 
       const keteranganLengkap = `[${jenis}] ${keterangan}`;
-      const duplicateSince = new Date(Date.now() - 10 * 60 * 1000).toISOString();
       const { data: existingDuplicate, error: duplicateError } = await privilegedSupabase
         .from('tagihan_krama')
         .select('id')
@@ -242,11 +241,10 @@ if (Astro.request.method === 'POST') {
         .eq('total_nominal', total_nominal)
         .eq('keterangan', keteranganLengkap)
         .eq('tanggal_kejadian', tanggal_kejadian)
-        .gte('created_at', duplicateSince)
         .limit(1);
       if (duplicateError) throw duplicateError;
       if (existingDuplicate && existingDuplicate.length > 0) {
-        throw new Error('Denda yang sama untuk anggota ini baru saja dicatat. Pengiriman ganda diabaikan.');
+        throw new Error('Denda dengan anggota, nominal, tanggal, dan keterangan yang sama sudah tercatat. Ubah keterangan jika memang transaksi terpisah.');
       }
 
       const { error } = await privilegedSupabase.from('tagihan_krama').insert([
@@ -550,6 +548,11 @@ if (Astro.request.method === 'POST') {
     }
   } catch (err: any) {
     errorMessage = 'Terjadi kesalahan: ' + err.message;
+  }
+
+  // Post/Redirect/Get: muat ulang halaman tidak mengirim ulang form dan menggandakan transaksi.
+  if (successMessage && !errorMessage) {
+    return Astro.redirect(`${Astro.url.pathname}?sukses=${encodeURIComponent(successMessage)}`, 303);
   }
 }
 
