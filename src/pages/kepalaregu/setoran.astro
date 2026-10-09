@@ -3,8 +3,8 @@ import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
 import { supabase } from '../../lib/supabase';
 import { formatRupiah } from '../../lib/utils';
 
-let message = '';
-let isSuccess = false;
+let message = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
+let isSuccess = Boolean(message);
 
 // Tangani aksi Form Submit (POST)
 if (Astro.request.method === 'POST') {
@@ -69,6 +69,13 @@ if (Astro.request.method === 'POST') {
   } catch (err: any) {
     message = err.message || 'Gagal memproses transaksi.';
     isSuccess = false;
+  }
+
+  // Post/Redirect/Get: muat ulang halaman tidak mengirim ulang form dan menggandakan transaksi.
+  if (message && isSuccess) {
+    const target = new URL(Astro.url);
+    target.searchParams.set('sukses', message);
+    return Astro.redirect(`${target.pathname}${target.search}`, 303);
   }
 }
 

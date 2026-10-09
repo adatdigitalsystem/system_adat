@@ -3,7 +3,7 @@ import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
 import { supabase } from '../../lib/supabase';
 import { formatRupiah } from '../../lib/utils';
 
-let message = '';
+let message = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 let isError = false;
 
 // Handle Form Submission untuk Membuat Event Adat Baru
@@ -60,6 +60,13 @@ if (Astro.request.method === 'POST') {
   } catch (err: any) {
     isError = true;
     message = err.message || 'Gagal menerbitkan acara adat.';
+  }
+
+  // Post/Redirect/Get: muat ulang halaman tidak mengirim ulang form dan menggandakan transaksi.
+  if (message && !isError) {
+    const target = new URL(Astro.url);
+    target.searchParams.set('sukses', message);
+    return Astro.redirect(`${target.pathname}${target.search}`, 303);
   }
 }
 

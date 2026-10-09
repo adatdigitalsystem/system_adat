@@ -5,7 +5,7 @@ import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
 import { labelStatusKeanggotaan } from '../../lib/utils';
 import PrintReportButton from '../../components/common/PrintReportButton.astro';
 
-let notice = '';
+let notice = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 let noticeIsError = false;
 const formatRupiah = (val: number) =>
   new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(val || 0);
@@ -219,6 +219,13 @@ if (Astro.request.method === 'POST') {
   } catch (err: any) {
     notice = err?.message || 'Gagal memproses pembayaran atau setoran.';
     noticeIsError = true;
+  }
+
+  // Post/Redirect/Get: muat ulang halaman tidak mengirim ulang form dan menggandakan transaksi.
+  if (notice && !noticeIsError) {
+    const target = new URL(Astro.url);
+    target.searchParams.set('sukses', notice);
+    return Astro.redirect(`${target.pathname}${target.search}`, 303);
   }
 }
 

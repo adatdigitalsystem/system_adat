@@ -10,7 +10,7 @@ import ProfilePhoto from '../../components/common/ProfilePhoto.astro';
 import '../../styles/global.css';
 
 let errorMessage = '';
-let successMessage = '';
+let successMessage = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 
 function normalizeFotoUrl(rawUrl: string): string | null {
   const value = rawUrl.trim();
@@ -396,6 +396,13 @@ if (Astro.request.method === 'POST') {
     }
   } catch (err: any) {
     errorMessage = 'Terjadi kesalahan: ' + err.message;
+  }
+
+  // Post/Redirect/Get: muat ulang halaman tidak mengirim ulang form dan menggandakan transaksi.
+  if (successMessage && !errorMessage) {
+    const target = new URL(Astro.url);
+    target.searchParams.set('sukses', successMessage);
+    return Astro.redirect(`${target.pathname}${target.search}`, 303);
   }
 }
 

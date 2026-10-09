@@ -20,6 +20,9 @@ if (Astro.request.method === 'POST') {
   } else {
     await supabase.from('anggota').insert([payload]);
   }
+
+  // Post/Redirect/Get: muat ulang halaman tidak mengirim ulang form.
+  return Astro.redirect(Astro.url.pathname, 303);
 }
 
 // Fetch Master Krama
