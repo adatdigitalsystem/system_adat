@@ -1,6 +1,7 @@
 ---
 import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
 import { supabase } from '../../lib/supabase';
+import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
 import { getGoogleDriveImageUrl } from '../../lib/googleDrivePublic';
 import { labelStatusKeanggotaan } from '../../lib/utils';
 import PrintReportButton from '../../components/common/PrintReportButton.astro';
@@ -10,6 +11,7 @@ const accessToken = Astro.cookies.get('sb-access-token')?.value;
 let profile: any = null;
 let listTagihan: any[] = [];
 let totalTunggakan = 0;
+let ledgerRows: any[] = [];
 
 if (accessToken) {
   const { data: { user } } = await supabase.auth.getUser(accessToken);
@@ -37,6 +39,74 @@ if (accessToken) {
           const totalNominal = Number(item.total_nominal ?? item.nominal ?? 0);
           return sum + Math.max(0, totalNominal - Number(item.jumlah_dibayar || 0));
         }, 0);
+
+      // Dibatasi ke anggota yang sedang login; klien server dipakai agar riwayat pembayaran sendiri selalu terbaca.
+      const { data: paymentData } = await createSupabaseAdminClient()
+        .from('riwayat_pembayaran_cicilan')
+        .select('id, tagihan_krama_id, nominal_bayar, tanggal_bayar, metode_pembayaran, keterangan, created_at')
+        .eq('anggota_id', profile.id);
+
+      const payments = paymentData || [];
+      const paidByBill = new Map<string, number>();
+      for (const payment of payments) {
+        if (!payment.tagihan_krama_id) continue;
+        paidByBill.set(payment.tagihan_krama_id, (paidByBill.get(payment.tagihan_krama_id) || 0) + Number(payment.nominal_bayar || 0));
+      }
+
+      const toTimestamp = (date: string) => {
+        const value = Date.parse(`${date}T12:00:00`);
+        return Number.isNaN(value) ? 0 : value;
+      };
+      const entries: any[] = [];
+      for (const bill of listTagihan) {
+        const date = bill.tanggal_kejadian || bill.created_at?.split('T')[0] || '';
+        const ts = toTimestamp(date);
+        const nominal = Number(bill.total_nominal ?? bill.nominal ?? 0);
+        entries.push({
+          id: `tagihan-${bill.id}`,
+          tanggal: date,
+          timestamp: ts,
+          order: 0,
+          noBukti: `TAG-${bill.id.slice(0, 8).toUpperCase()}`,
+          keterangan: bill.keterangan || bill.jenis_tagihan || bill.event_adat?.nama_event || 'Tagihan kewajiban',
+          debit: nominal,
+          kredit: 0,
+        });
+        const unitemized = Math.max(0, Number(bill.jumlah_dibayar || 0) - (paidByBill.get(bill.id) || 0));
+        if (unitemized > 0) {
+          entries.push({
+            id: `rekonsiliasi-${bill.id}`,
+            tanggal: date,
+            timestamp: ts,
+            order: 1,
+            noBukti: `SALDO-${bill.id.slice(0, 8).toUpperCase()}`,
+            keterangan: `Saldo pembayaran lama; rincian transaksi tidak tersedia (${bill.keterangan || 'tagihan'})`,
+            debit: 0,
+            kredit: unitemized,
+          });
+        }
+      }
+      for (const payment of payments) {
+        const date = payment.tanggal_bayar?.split('T')[0] || payment.created_at?.split('T')[0] || '';
+        const parsed = payment.tanggal_bayar ? Date.parse(payment.tanggal_bayar) : toTimestamp(date);
+        entries.push({
+          id: `pembayaran-${payment.id}`,
+          tanggal: date,
+          timestamp: Number.isNaN(parsed) ? 0 : parsed,
+          order: 2,
+          noBukti: `BYR-${payment.id.slice(0, 8).toUpperCase()}`,
+          keterangan: payment.keterangan || `Pembayaran ${payment.metode_pembayaran || 'diterima'}`,
+          debit: 0,
+          kredit: Number(payment.nominal_bayar || 0),
+        });
+      }
+      entries.sort((a, b) => a.timestamp - b.timestamp || a.order - b.order || a.id.localeCompare(b.id));
+      let runningBalance = 0;
+      for (const entry of entries) {
+        runningBalance += entry.debit - entry.kredit;
+        entry.saldo = runningBalance;
+      }
+      ledgerRows = entries;
     }
   }
 }
@@ -100,38 +170,37 @@ const formatRupiah = (val: number) =>
       </div>
     </div>
 
-    <!-- Tabel Rincian Tagihan -->
+    <!-- Buku Besar Kewajiban -->
     <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-      <h2 class="text-base font-bold text-slate-800 mb-4">Rincian Tagihan & Denda</h2>
+      <h2 class="text-base font-bold text-slate-800 mb-1">Rincian Tagihan & Denda</h2>
+      <p class="mb-4 text-xs text-slate-500">Debet menambah kewajiban, kredit adalah pembayaran, saldo adalah sisa kewajiban berjalan.</p>
       <div class="overflow-x-auto">
         <table class="w-full text-sm text-left text-slate-600">
           <thead class="bg-slate-50 text-xs text-slate-500 uppercase border-b border-slate-200">
             <tr>
-              <th class="p-3">Jenis Tagihan</th>
+              <th class="p-3">Tanggal</th>
+              <th class="p-3">No. Bukti</th>
               <th class="p-3">Keterangan</th>
-              <th class="p-3 text-right">Nominal</th>
-              <th class="p-3 text-center">Status</th>
+              <th class="p-3 text-right">Debet</th>
+              <th class="p-3 text-right">Kredit</th>
+              <th class="p-3 text-right">Saldo</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
-            {listTagihan.length > 0 ? (
-              listTagihan.map((item) => (
+            {ledgerRows.length > 0 ? (
+              ledgerRows.map((row) => (
                 <tr class="hover:bg-slate-50">
-                  <td class="p-3 font-medium text-slate-800">{item.jenis_tagihan || item.event_adat?.nama_event || 'Iuran Adat'}</td>
-                  <td class="p-3">{item.keterangan || item.event_adat?.nama_event || '-'}</td>
-                  <td class="p-3 text-right font-bold text-slate-900">{formatRupiah(Number(item.total_nominal ?? item.nominal ?? 0))}</td>
-                  <td class="p-3 text-center">
-                    <span class={`px-2.5 py-1 text-xs font-bold rounded-full ${
-                      item.status_bayar === 'LUNAS' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                    }`}>
-                      {item.status_bayar}
-                    </span>
-                  </td>
+                  <td class="whitespace-nowrap p-3">{row.tanggal || '-'}</td>
+                  <td class="whitespace-nowrap p-3 font-mono text-xs font-semibold">{row.noBukti}</td>
+                  <td class="max-w-sm whitespace-pre-wrap p-3 text-slate-800">{row.keterangan}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-semibold text-red-800">{row.debit > 0 ? formatRupiah(row.debit) : '-'}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-semibold text-emerald-800">{row.kredit > 0 ? formatRupiah(row.kredit) : '-'}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-bold text-slate-900">{formatRupiah(row.saldo)}</td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td colspan="4" class="p-6 text-center text-slate-400 italic">Belum ada catatan tagihan.</td>
+                <td colspan="6" class="p-6 text-center text-slate-400 italic">Belum ada catatan tagihan.</td>
               </tr>
             )}
           </tbody>
