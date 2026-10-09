@@ -9,3 +9,5 @@ dist/
 supabase/.temp/
 supabase/.branches/
 .vercel/
+.vercel
+.env*

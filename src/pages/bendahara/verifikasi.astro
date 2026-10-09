@@ -320,6 +320,55 @@ if (Astro.request.method === 'POST') {
 
       successMessage = `Pembayaran Numbas Ayahan ${formatRupiah(nominalBayar)} untuk ${anggotaPasif?.nama_lengkap || 'anggota'} berhasil dicatat.`;
     }
+    else if (action === 'edit_transaksi_kas') {
+      const kasId = formData.get('kas_id')?.toString();
+      const tanggal = formData.get('tanggal')?.toString() || '';
+      const penerima = formData.get('pihak')?.toString().trim() || '';
+      const keterangan = formData.get('keterangan')?.toString().trim() || '';
+      const nominal = Number(formData.get('nominal'));
+      const metode = formData.get('metode_pembayaran')?.toString() || 'TUNAI';
+      const buktiUrl = formData.get('bukti_url')?.toString().trim() || null;
+      const requestedCategory = formData.get('kategori')?.toString() || '';
+      if (!kasId) throw new Error('Transaksi kas tidak valid.');
+
+      const { data: existingKas, error: existingKasError } = await privilegedSupabase
+        .from('transaksi_kas')
+        .select('id, arah, kategori')
+        .eq('id', kasId)
+        .maybeSingle();
+      if (existingKasError) throw existingKasError;
+      if (!existingKas) throw new Error('Transaksi kas tidak ditemukan atau sudah dihapus.');
+
+      const isOpening = existingKas.arah === 'SALDO_AWAL';
+      const categoriesByDirection: Record<string, string[]> = {
+        MASUK: ['PEMASUKAN_LAIN', 'SUMBANGAN', 'PENGEMBALIAN_DANA'],
+        KELUAR: ['BANTUAN_DUKA', 'BANTUAN_PERNIKAHAN', 'OPERASIONAL', 'LAINNYA'],
+      };
+      const kategori = isOpening ? existingKas.kategori : requestedCategory;
+      if (!isOpening && !categoriesByDirection[existingKas.arah]?.includes(kategori)) {
+        throw new Error('Pilih kategori yang sesuai dengan jenis transaksi.');
+      }
+      if (!isValidDate(tanggal) || !penerima || !keterangan || !Number.isFinite(nominal) || nominal < 0 || (!isOpening && nominal === 0)) {
+        throw new Error('Lengkapi tanggal, pihak, keterangan, dan nominal kas yang valid.');
+      }
+      if (!['TUNAI', 'TRANSFER', 'LAINNYA'].includes(metode)) throw new Error('Metode pembayaran tidak valid.');
+      if (buktiUrl) {
+        let parsedBukti: URL;
+        try {
+          parsedBukti = new URL(buktiUrl);
+        } catch {
+          throw new Error('Link bukti harus berupa URL yang valid.');
+        }
+        if (!['http:', 'https:'].includes(parsedBukti.protocol)) throw new Error('Link bukti harus menggunakan HTTP atau HTTPS.');
+      }
+
+      const { error: updateKasError } = await privilegedSupabase
+        .from('transaksi_kas')
+        .update({ tanggal, kategori, penerima, keterangan, nominal, metode_pembayaran: metode, bukti_url: buktiUrl })
+        .eq('id', kasId);
+      if (updateKasError) throw updateKasError;
+      successMessage = 'Transaksi kas berhasil diperbarui; saldo buku kas dihitung ulang.';
+    }
     else if (action === 'edit_tagihan') {
       const tagihanId = formData.get('tagihan_id')?.toString();
       const tanggal = formData.get('tanggal')?.toString() || '';
@@ -725,6 +774,11 @@ for (const payment of listPayments || []) {
     keterangan: payment.keterangan || 'Pembayaran diterima langsung Bendahara',
     debit: Number(payment.nominal_bayar || 0),
     kredit: 0,
+    editType: 'pembayaran',
+    editId: payment.id,
+    editDate: date,
+    editAmount: Number(payment.nominal_bayar || 0),
+    editDescription: payment.keterangan || '',
   });
 }
 
@@ -745,6 +799,15 @@ for (const transaction of listTransaksiKas || []) {
     buktiUrl: transaction.bukti_url,
     debit: isCashIn ? Number(transaction.nominal || 0) : 0,
     kredit: isCashIn ? 0 : Number(transaction.nominal || 0),
+    editType: 'kas',
+    editId: transaction.id,
+    editDate: transaction.tanggal,
+    editAmount: Number(transaction.nominal || 0),
+    editDescription: transaction.keterangan || '',
+    editPihak: transaction.penerima || '',
+    editKategori: transaction.kategori,
+    editMetode: transaction.metode_pembayaran || 'TUNAI',
+    editBukti: transaction.bukti_url || '',
   });
 }
 
@@ -1455,9 +1518,28 @@ const labelKategoriKas = (category: string) => ({
           </thead>
           <tbody id="bendahara-cash-rows" class="divide-y divide-slate-100">
             {cashLedger.length ? cashLedger.map((movement) => (
-              <tr class="page-row hover:bg-slate-50">
+              <tr
+                class="page-row hover:bg-slate-50 cash-edit-row"
+                data-edit-type={movement.editType}
+                data-edit-id={movement.editId}
+                data-edit-date={movement.editDate}
+                data-edit-amount={movement.editAmount}
+                data-edit-description={movement.editDescription}
+                data-edit-pihak={movement.editPihak}
+                data-edit-kategori={movement.editKategori}
+                data-edit-metode={movement.editMetode}
+                data-edit-bukti={movement.editBukti}
+                data-edit-arah={movement.jenis}
+                data-member={movement.pihak}
+              >
                 <td class="whitespace-nowrap p-3">{movement.tanggal || '-'}</td>
-                <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">{movement.referensi}</td>
+                <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">
+                  {movement.editType ? (
+                    <button type="button" data-open-transaction-edit data-open-cash-edit title="Klik untuk mengedit transaksi" class="font-mono font-semibold text-blue-700 underline decoration-dotted underline-offset-2 hover:text-blue-900">{movement.referensi}</button>
+                  ) : (
+                    <span title="Dibuat otomatis dari setoran. Untuk koreksi, tolak atau balikkan setoran.">{movement.referensi}</span>
+                  )}
+                </td>
                 <td class="p-3">
                   <p class={`font-semibold ${movement.jenis === 'KELUAR' || movement.jenis === 'PEMBALIKAN' ? 'text-red-800' : 'text-emerald-800'}`}>{labelKategoriKas(movement.kategori)}</p>
                   <p class="mt-1 text-slate-500">{movement.pihak}</p>
@@ -1711,6 +1793,63 @@ const labelKategoriKas = (category: string) => ({
       </div>
     </div>
 
+    <dialog id="dialog-edit-kas" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div class="space-y-5 bg-white p-6">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="text-xs font-bold uppercase text-blue-700">Edit Transaksi Kas</p>
+            <h2 id="edit-kas-title" class="mt-1 text-lg font-black text-slate-900">Perbarui catatan buku kas</h2>
+            <p id="edit-kas-ref" class="mt-1 text-xs text-slate-500"></p>
+          </div>
+          <button type="button" data-close-dialog="dialog-edit-kas" aria-label="Tutup form edit kas" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
+        </div>
+        <form id="edit-kas-form" method="POST" class="space-y-4" onsubmit="return confirm('Simpan perubahan transaksi kas? Saldo buku kas akan dihitung ulang.');">
+          <input type="hidden" name="action" value="edit_transaksi_kas" />
+          <input id="edit-kas-id" type="hidden" name="kas_id" />
+          <div class="grid gap-4 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Tanggal</span>
+              <input id="edit-kas-date" type="date" name="tanggal" required class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Nominal (Rp)</span>
+              <input id="edit-kas-amount" type="number" name="nominal" min="0" step="1" required class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+            </label>
+          </div>
+          <label id="edit-kas-category-wrap" class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Kategori</span>
+            <select id="edit-kas-category" name="kategori" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm"></select>
+          </label>
+          <label class="block space-y-1">
+            <span id="edit-kas-party-label" class="text-[11px] font-bold uppercase text-slate-600">Pihak</span>
+            <input id="edit-kas-party" type="text" name="pihak" required maxlength="200" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+          </label>
+          <label class="block space-y-1">
+            <span class="text-[11px] font-bold uppercase text-slate-600">Keterangan</span>
+            <textarea id="edit-kas-description" name="keterangan" rows="3" required maxlength="1000" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm"></textarea>
+          </label>
+          <div class="grid gap-4 sm:grid-cols-2">
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Metode</span>
+              <select id="edit-kas-method" name="metode_pembayaran" class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm">
+                <option value="TUNAI">Tunai</option>
+                <option value="TRANSFER">Transfer</option>
+                <option value="LAINNYA">Lainnya</option>
+              </select>
+            </label>
+            <label class="block space-y-1">
+              <span class="text-[11px] font-bold uppercase text-slate-600">Link bukti (opsional)</span>
+              <input id="edit-kas-proof" type="url" name="bukti_url" class="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" />
+            </label>
+          </div>
+          <div class="flex justify-end gap-2 border-t border-slate-100 pt-4">
+            <button type="button" data-close-dialog="dialog-edit-kas" class="rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50">Batal</button>
+            <button type="submit" class="rounded-lg bg-blue-700 px-4 py-2 text-xs font-bold text-white hover:bg-blue-800">Simpan Perubahan</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
     <dialog id="dialog-edit-transaksi" class="w-full max-w-xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
       <div class="space-y-5 bg-white p-6">
         <div class="flex items-start justify-between gap-4">
@@ -1784,8 +1923,9 @@ const labelKategoriKas = (category: string) => ({
 
   document.querySelectorAll<HTMLButtonElement>('[data-open-transaction-edit]').forEach((button) => {
     button.addEventListener('click', () => {
-      const row = button.closest<HTMLTableRowElement>('.bendahara-history-row');
+      const row = button.closest<HTMLTableRowElement>('.bendahara-history-row, .cash-edit-row');
       if (!row || !editTransactionDialog || !editTransactionForm) return;
+      if (row.dataset.editType === 'kas') return;
       const type = row.dataset.editType;
       if (type !== 'tagihan' && type !== 'pembayaran') return;
 
@@ -1823,6 +1963,48 @@ const labelKategoriKas = (category: string) => ({
         if (submitButton) submitButton.disabled = false;
       }
       editTransactionDialog.showModal();
+    });
+  });
+
+  const cashDialog = document.querySelector<HTMLDialogElement>('#dialog-edit-kas');
+  const cashCategories: Record<string, Array<[string, string]>> = {
+    MASUK: [['PEMASUKAN_LAIN', 'Pemasukan lain'], ['SUMBANGAN', 'Sumbangan'], ['PENGEMBALIAN_DANA', 'Pengembalian dana']],
+    KELUAR: [['BANTUAN_DUKA', 'Bantuan keluarga berduka'], ['BANTUAN_PERNIKAHAN', 'Pembayaran kepada mempelai'], ['OPERASIONAL', 'Operasional banjar'], ['LAINNYA', 'Pengeluaran lainnya']],
+  };
+  document.querySelectorAll<HTMLButtonElement>('[data-open-cash-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const row = button.closest<HTMLTableRowElement>('.cash-edit-row');
+      if (!row || row.dataset.editType !== 'kas' || !cashDialog) return;
+      const arah = row.dataset.editArah || 'KELUAR';
+      const isOpening = arah === 'SALDO_AWAL';
+      const setValue = (id: string, value: string) => {
+        const element = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null;
+        if (element) element.value = value;
+      };
+      setValue('edit-kas-id', row.dataset.editId || '');
+      setValue('edit-kas-date', row.dataset.editDate || '');
+      setValue('edit-kas-amount', row.dataset.editAmount || '0');
+      setValue('edit-kas-party', row.dataset.editPihak || '');
+      setValue('edit-kas-description', row.dataset.editDescription || '');
+      setValue('edit-kas-method', row.dataset.editMetode || 'TUNAI');
+      setValue('edit-kas-proof', row.dataset.editBukti || '');
+
+      const categorySelect = document.getElementById('edit-kas-category') as HTMLSelectElement | null;
+      const categoryWrap = document.getElementById('edit-kas-category-wrap');
+      if (categorySelect) {
+        categorySelect.innerHTML = '';
+        (cashCategories[arah] || []).forEach(([value, label]) => categorySelect.add(new Option(label, value)));
+        categorySelect.value = row.dataset.editKategori || '';
+        categorySelect.disabled = isOpening;
+      }
+      categoryWrap?.classList.toggle('hidden', isOpening);
+      const title = document.getElementById('edit-kas-title');
+      if (title) title.textContent = isOpening ? 'Edit Saldo Awal Kas' : arah === 'MASUK' ? 'Edit Pemasukan Kas' : 'Edit Pengeluaran Kas';
+      const partyLabel = document.getElementById('edit-kas-party-label');
+      if (partyLabel) partyLabel.textContent = arah === 'KELUAR' ? 'Penerima' : 'Sumber dana';
+      const ref = document.getElementById('edit-kas-ref');
+      if (ref) ref.textContent = button.textContent?.trim() || '';
+      cashDialog.showModal();
     });
   });
 
