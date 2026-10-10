@@ -74,7 +74,7 @@ const selectedReguId = selectedRegu?.regu_id || null;
 const selectedNoRegu = selectedRegu?.no_regu || null;
 const selectedReguValue = selectedRegu?.value || null;
 const reguKepala = isReadOnlyReguViewer ? selectedRegu?.nama_regu || null : selectedRegu?.nama_regu || kepalaProfile?.no_regu || null;
-const namaKepala = isBendahara ? `${kepalaProfile?.nama_lengkap || 'Bendahara'} (Bendahara)` : isReadOnlyReguViewer ? 'Pemantauan Admin' : kepalaProfile?.nama_lengkap || 'Kepala Regu';
+const namaKepala = isBendahara ? `${kepalaProfile?.nama_lengkap || 'Bendahara'} (Bendahara)` : isReadOnlyReguViewer ? `${kepalaProfile?.nama_lengkap || 'Admin'} (Admin)` : kepalaProfile?.nama_lengkap || 'Kepala Regu';
 
 let anggotaRegu: any[] = [];
 if (selectedReguId || selectedNoRegu) {
@@ -90,20 +90,20 @@ if (selectedReguId || selectedNoRegu) {
 }
 
 // Kepala Regu bekerja pada regunya sendiri; Bendahara dapat bertindak untuk regu yang dipilih.
-const canCollectPayments = Boolean(kepalaProfile) && (isKepalaRegu || (isBendahara && Boolean(selectedRegu)));
+const canCollectPayments = Boolean(kepalaProfile) && (isKepalaRegu || (isReadOnlyReguViewer && Boolean(selectedRegu)));
 const anggotaReguIds = new Set(anggotaRegu.map((anggota) => anggota.id));
 const kepalaReguIds = isReadOnlyReguViewer
   ? anggotaRegu.filter((anggota) => ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes((anggota.role || '').toUpperCase().replace(/[\s_-]/g, ''))).map((anggota) => anggota.id)
   : kepalaProfile?.id ? [kepalaProfile.id] : [];
 // Penerima kas yang sah untuk regu ini: kepala regu terkait, ditambah Bendahara bila ia yang bertindak.
-const penerimaKasIds = [...new Set([...kepalaReguIds, ...(isBendahara && kepalaProfile ? [kepalaProfile.id] : [])])];
+const penerimaKasIds = [...new Set([...kepalaReguIds, ...(isReadOnlyReguViewer && kepalaProfile ? [kepalaProfile.id] : [])])];
 
 if (Astro.request.method === 'POST') {
   try {
     if (!accessToken || !kepalaProfile) throw new Error('Sesi tidak valid. Silakan login kembali.');
-    if (isBendahara && !selectedRegu) throw new Error('Pilih regu terlebih dahulu sebelum menerima pembayaran atau menyetor.');
+    if (isReadOnlyReguViewer && !selectedRegu) throw new Error('Pilih regu terlebih dahulu sebelum menerima pembayaran atau menyetor.');
     if (!canCollectPayments) {
-      throw new Error('Aksi pungutan dan setoran hanya dapat dilakukan oleh Kepala Regu atau Bendahara.');
+      throw new Error('Aksi pungutan dan setoran hanya dapat dilakukan oleh Kepala Regu, Bendahara, atau Admin.');
     }
     const formData = await Astro.request.formData();
     const action = formData.get('action_type')?.toString();
@@ -166,7 +166,7 @@ if (Astro.request.method === 'POST') {
         diterima_oleh: kepalaProfile.id,
         nominal_bayar: nominalBayar,
         metode_pembayaran: 'CASH_REGU',
-        keterangan: isBendahara ? 'Pembayaran tunai diterima Bendahara atas nama regu' : 'Pembayaran tunai diterima Kepala Regu',
+        keterangan: isReadOnlyReguViewer ? `Pembayaran tunai diterima ${isBendahara ? 'Bendahara' : 'Admin'} atas nama regu` : 'Pembayaran tunai diterima Kepala Regu',
       }).select('id').single();
       if (paymentError) throw paymentError;
 
@@ -203,7 +203,7 @@ if (Astro.request.method === 'POST') {
           kepala_regu_id: kepalaProfile.id,
           total_nominal: totalSetoran,
           status_verifikasi: 'PENDING',
-          keterangan: `Penyetoran ${payments.length} transaksi pembayaran anggota Regu ${reguKepala || kepalaProfile.no_regu || '-'}${isBendahara ? ' (diajukan oleh Bendahara)' : ''}`,
+          keterangan: `Penyetoran ${payments.length} transaksi pembayaran anggota Regu ${reguKepala || kepalaProfile.no_regu || '-'}${isReadOnlyReguViewer ? ` (diajukan oleh ${isBendahara ? 'Bendahara' : 'Admin'})` : ''}`,
         })
         .select('id')
         .single();
@@ -272,7 +272,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
     <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
       <div>
         <span class="text-xs font-bold px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full">
-          {isBendahara ? 'Mode Bendahara - Bertindak untuk Regu' : isReadOnlyReguViewer ? 'Mode Pemantauan Regu' : 'Portal Kepala Regu'} {reguKepala ? `- ${reguKepala}` : ''}
+          {isReadOnlyReguViewer ? `Mode ${isBendahara ? 'Bendahara' : 'Admin'} - Bertindak untuk Regu` : 'Portal Kepala Regu'} {reguKepala ? `- ${reguKepala}` : ''}
         </span>
         <h1 class="text-xl md:text-2xl font-black mt-2">{isReadOnlyReguViewer ? 'Pemantauan Anggota & Kewajiban Regu' : 'Pengelolaan Anggota & Kewajiban Regu'}</h1>
       </div>
@@ -296,7 +296,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
 
     {isReadOnlyReguViewer && !selectedRegu && (
       <div class="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
-        Pilih regu di atas untuk melihat anggota, kewajiban event, dan kas yang belum disetorkan. {isBendahara ? 'Setelah memilih regu, Anda dapat menerima pembayaran dan mengajukan setoran seperti Kepala Regu.' : 'Mode ini hanya untuk pemantauan.'}
+        Pilih regu di atas untuk melihat anggota, kewajiban event, dan kas yang belum disetorkan. Setelah memilih regu, Anda dapat menerima pembayaran dan mengajukan setoran seperti Kepala Regu.
       </div>
     )}
 
