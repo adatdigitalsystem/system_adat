@@ -123,11 +123,6 @@ const formatTanggal = (value: string | null | undefined) => {
               <th class="p-3">Kontak</th>
               <th class="p-3">Alamat</th>
               <th class="p-3">Tanggal lahir</th>
-              <th class="p-3" aria-sort="none">
-                <button type="button" data-directory-sort="marital" class="inline-flex items-center gap-1 font-bold hover:text-slate-900 focus-visible:outline-2 focus-visible:outline-blue-600">
-                  Perkawinan <span data-directory-sort-indicator aria-hidden="true">↕</span>
-                </button>
-              </th>
               <th class="p-3 text-right">Saldo kewajiban</th>
             </tr>
           </thead>
@@ -146,7 +141,6 @@ const formatTanggal = (value: string | null | undefined) => {
                   data-sort-name={item.nama_lengkap || ''}
                   data-sort-status-role={`${labelStatusKeanggotaan(item.status_aktif)} ${item.role || 'KRAMA'}`}
                   data-sort-regu-tempekan={`${item.no_regu || ''} ${item.tempekan || ''}`}
-                  data-sort-marital={item.status_perkawinan?.replaceAll('_', ' ') || ''}
                 >
                   <td class="p-3">
                     <div class="flex items-center gap-3">
@@ -178,16 +172,15 @@ const formatTanggal = (value: string | null | undefined) => {
                   </td>
                   <td class="max-w-56 whitespace-pre-wrap p-3">{item.alamat || '-'}</td>
                   <td class="whitespace-nowrap p-3">{formatTanggal(item.tanggal_lahir)}</td>
-                  <td class="p-3">{item.status_perkawinan?.replaceAll('_', ' ') || '-'}</td>
                   <td class={`whitespace-nowrap p-3 text-right font-bold ${saldo > 0 ? 'text-amber-800' : 'text-emerald-700'}`}>{formatRupiah(saldo)}</td>
                 </tr>
               );
             })}
             <tr id="member-empty" class="hidden">
-              <td colspan="8" class="p-8 text-center text-slate-500">Tidak ada anggota yang cocok dengan pencarian.</td>
+              <td colspan="7" class="p-8 text-center text-slate-500">Tidak ada anggota yang cocok dengan pencarian.</td>
             </tr>
             {!anggota.length && !errorMessage && (
-              <tr><td colspan="8" class="p-8 text-center text-slate-500">Belum ada data anggota.</td></tr>
+              <tr><td colspan="7" class="p-8 text-center text-slate-500">Belum ada data anggota.</td></tr>
             )}
           </tbody>
         </table>

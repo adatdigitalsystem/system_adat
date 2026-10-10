@@ -150,10 +150,6 @@ const formatTanggal = (value: string | null | undefined) => {
           <dt class="text-xs font-bold uppercase text-slate-500">Umur</dt>
           <dd class="mt-1 text-sm text-slate-900">{hitungUmur(anggota.tanggal_lahir)}</dd>
         </div>
-        <div class="p-5">
-          <dt class="text-xs font-bold uppercase text-slate-500">Status Perkawinan</dt>
-          <dd class="mt-1 text-sm text-slate-900">{anggota.status_perkawinan?.replaceAll('_', ' ') || '-'}</dd>
-        </div>
       </dl>
     </section>
 

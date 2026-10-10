@@ -48,7 +48,6 @@ if (Astro.request.method === 'POST') {
       const no_regu = formData.get('no_regu') as string;
       const tempekan = formData.get('tempekan') as string;
       const alamat = formData.get('alamat') as string;
-      const status_perkawinan = formData.get('status_perkawinan') as string;
       const status_aktif = formData.get('status_aktif')?.toString() || 'AKTIF';
       const fotoUrl = normalizeFotoUrl((formData.get('foto_url') as string) || '');
 
@@ -86,7 +85,6 @@ if (Astro.request.method === 'POST') {
           no_regu: no_regu ? parseInt(no_regu) : null,
           tempekan,
           alamat,
-          status_perkawinan: status_perkawinan || null,
           foto_url: fotoUrl,
           status_aktif
         }
@@ -117,7 +115,6 @@ if (Astro.request.method === 'POST') {
       const tempekan = formData.get('tempekan') as string;
       const tanggal_lahir = formData.get('tanggal_lahir') as string;
       const alamat = formData.get('alamat') as string;
-      const status_perkawinan = formData.get('status_perkawinan') as string;
       const status_aktif = formData.get('status_aktif') as string;
       const new_password = formData.get('new_password') as string;
       const fotoUrl = normalizeFotoUrl((formData.get('foto_url') as string) || '');
@@ -184,7 +181,6 @@ if (Astro.request.method === 'POST') {
         tempekan,
         tanggal_lahir: tanggal_lahir || null,
         alamat,
-        status_perkawinan: status_perkawinan || null,
         foto_url: fotoUrl,
         status_aktif,
       };
@@ -528,16 +524,6 @@ for (const payment of listAdminPayments || []) {
             <input type="text" name="tempekan" placeholder="Contoh: Tempekan Kaja" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
           </div>
 
-          <div>
-            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Perkawinan</label>
-            <select name="status_perkawinan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
-              <option value="">-- Pilih Status --</option>
-              <option value="BELUM_MENIKAH">Belum Menikah</option>
-              <option value="MENIKAH">Menikah</option>
-              <option value="CERAI_HIDUP">Cerai Hidup</option>
-              <option value="CERAI_MATI">Cerai Mati</option>
-            </select>
-          </div>
 
           <div>
             <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Alamat Lengkap</label>
@@ -994,16 +980,6 @@ for (const payment of listAdminPayments || []) {
             <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tempekan</label>
             <input type="text" id="edit_tempekan" name="tempekan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
           </div>
-          <div>
-            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Status Perkawinan</label>
-            <select id="edit_status_perkawinan" name="status_perkawinan" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
-              <option value="">-- Pilih Status --</option>
-              <option value="BELUM_MENIKAH">Belum Menikah</option>
-              <option value="MENIKAH">Menikah</option>
-              <option value="CERAI_HIDUP">Cerai Hidup</option>
-              <option value="CERAI_MATI">Cerai Mati</option>
-            </select>
-          </div>
         </div>
 
         <div>
@@ -1337,7 +1313,6 @@ for (const payment of listAdminPayments || []) {
             document.getElementById('edit_no_regu').value = krama.no_regu || '';
             document.getElementById('edit_tempekan').value = krama.tempekan || '';
             document.getElementById('edit_tanggal_lahir').value = krama.tanggal_lahir ? krama.tanggal_lahir.slice(0, 10) : '';
-            document.getElementById('edit_status_perkawinan').value = krama.status_perkawinan || '';
             document.getElementById('edit_alamat').value = krama.alamat || '';
             document.getElementById('edit_status_aktif').value = krama.status_aktif || 'AKTIF';
             
