@@ -29,7 +29,7 @@ const dataClient = kepalaProfile ? createSupabaseAdminClient() : supabase;
 const kepalaRole = (kepalaProfile?.role || '').toUpperCase().replace(/[\s_-]/g, '');
 const isKepalaRegu = ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes(kepalaRole);
 const isReadOnlyReguViewer = ['ADMIN', 'BENDAHARA'].includes(kepalaRole);
-const canCollectPayments = isKepalaRegu;
+const isBendahara = kepalaRole === 'BENDAHARA';
 
 const [{ data: masterRegu }, { data: anggotaDenganRegu }] = await Promise.all([
   dataClient.from('regu').select('id, nama_regu').order('nama_regu', { ascending: true }),
@@ -74,7 +74,7 @@ const selectedReguId = selectedRegu?.regu_id || null;
 const selectedNoRegu = selectedRegu?.no_regu || null;
 const selectedReguValue = selectedRegu?.value || null;
 const reguKepala = isReadOnlyReguViewer ? selectedRegu?.nama_regu || null : selectedRegu?.nama_regu || kepalaProfile?.no_regu || null;
-const namaKepala = isReadOnlyReguViewer ? 'Pemantauan Bendahara' : kepalaProfile?.nama_lengkap || 'Kepala Regu';
+const namaKepala = isBendahara ? `${kepalaProfile?.nama_lengkap || 'Bendahara'} (Bendahara)` : isReadOnlyReguViewer ? 'Pemantauan Admin' : kepalaProfile?.nama_lengkap || 'Kepala Regu';
 
 let anggotaRegu: any[] = [];
 if (selectedReguId || selectedNoRegu) {
@@ -89,11 +89,21 @@ if (selectedReguId || selectedNoRegu) {
   anggotaRegu = data || [];
 }
 
+// Kepala Regu bekerja pada regunya sendiri; Bendahara dapat bertindak untuk regu yang dipilih.
+const canCollectPayments = Boolean(kepalaProfile) && (isKepalaRegu || (isBendahara && Boolean(selectedRegu)));
+const anggotaReguIds = new Set(anggotaRegu.map((anggota) => anggota.id));
+const kepalaReguIds = isReadOnlyReguViewer
+  ? anggotaRegu.filter((anggota) => ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes((anggota.role || '').toUpperCase().replace(/[\s_-]/g, ''))).map((anggota) => anggota.id)
+  : kepalaProfile?.id ? [kepalaProfile.id] : [];
+// Penerima kas yang sah untuk regu ini: kepala regu terkait, ditambah Bendahara bila ia yang bertindak.
+const penerimaKasIds = [...new Set([...kepalaReguIds, ...(isBendahara && kepalaProfile ? [kepalaProfile.id] : [])])];
+
 if (Astro.request.method === 'POST') {
   try {
-    if (!accessToken || !kepalaProfile) throw new Error('Sesi Kepala Regu tidak valid. Silakan login kembali.');
+    if (!accessToken || !kepalaProfile) throw new Error('Sesi tidak valid. Silakan login kembali.');
+    if (isBendahara && !selectedRegu) throw new Error('Pilih regu terlebih dahulu sebelum menerima pembayaran atau menyetor.');
     if (!canCollectPayments) {
-      throw new Error('Aksi pungutan dan setoran hanya dapat dilakukan oleh Kepala Regu.');
+      throw new Error('Aksi pungutan dan setoran hanya dapat dilakukan oleh Kepala Regu atau Bendahara.');
     }
     const formData = await Astro.request.formData();
     const action = formData.get('action_type')?.toString();
@@ -113,15 +123,10 @@ if (Astro.request.method === 'POST') {
       if (tagihanError) throw tagihanError;
       if (!tagihan) throw new Error('Tagihan tidak ditemukan.');
 
-      const { data: anggota, error: anggotaError } = await dataClient
-        .from('anggota')
-        .select('id, regu_id')
-        .eq('id', tagihan.anggota_id)
-        .maybeSingle();
-      if (anggotaError) throw anggotaError;
-      if (!anggota || anggota.regu_id !== kepalaProfile.regu_id) {
-        throw new Error('Anda hanya dapat menerima pembayaran dari anggota regu sendiri.');
+      if (!anggotaReguIds.has(tagihan.anggota_id)) {
+        throw new Error('Anda hanya dapat menerima pembayaran dari anggota regu yang sedang dikelola.');
       }
+      const anggota = { id: tagihan.anggota_id };
 
       const totalNominal = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
       const jumlahDibayar = Number(tagihan.jumlah_dibayar || 0);
@@ -161,7 +166,7 @@ if (Astro.request.method === 'POST') {
         diterima_oleh: kepalaProfile.id,
         nominal_bayar: nominalBayar,
         metode_pembayaran: 'CASH_REGU',
-        keterangan: 'Pembayaran tunai diterima Kepala Regu',
+        keterangan: isBendahara ? 'Pembayaran tunai diterima Bendahara atas nama regu' : 'Pembayaran tunai diterima Kepala Regu',
       }).select('id').single();
       if (paymentError) throw paymentError;
 
@@ -183,7 +188,8 @@ if (Astro.request.method === 'POST') {
       const { data: payments, error: paymentsError } = await dataClient
         .from('riwayat_pembayaran_cicilan')
         .select('id, nominal_bayar')
-        .eq('diterima_oleh', kepalaProfile.id)
+        .in('diterima_oleh', penerimaKasIds)
+        .in('anggota_id', [...anggotaReguIds].length ? [...anggotaReguIds] : ['00000000-0000-0000-0000-000000000000'])
         .is('setoran_regu_id', null);
       if (paymentsError) throw paymentsError;
 
@@ -193,11 +199,11 @@ if (Astro.request.method === 'POST') {
       const { data: setoran, error: depositError } = await dataClient
         .from('setoran_regu')
         .insert({
-          regu_id: kepalaProfile.regu_id,
+          regu_id: selectedReguId || kepalaProfile.regu_id,
           kepala_regu_id: kepalaProfile.id,
           total_nominal: totalSetoran,
           status_verifikasi: 'PENDING',
-          keterangan: `Penyetoran ${payments.length} transaksi pembayaran anggota Regu ${kepalaProfile.no_regu || '-'}`,
+          keterangan: `Penyetoran ${payments.length} transaksi pembayaran anggota Regu ${reguKepala || kepalaProfile.no_regu || '-'}${isBendahara ? ' (diajukan oleh Bendahara)' : ''}`,
         })
         .select('id')
         .single();
@@ -243,13 +249,11 @@ const anggotaIds = anggotaRegu?.map(a => a.id) || [];
   if (anggotaIds.length) tagihanQuery = tagihanQuery.in('anggota_id', anggotaIds);
   const { data: listTagihan } = anggotaIds.length ? await tagihanQuery : { data: [] };
 
-const kepalaReguIds = isReadOnlyReguViewer
-  ? anggotaRegu.filter((anggota) => ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes((anggota.role || '').toUpperCase().replace(/[\s_-]/g, ''))).map((anggota) => anggota.id)
-  : kepalaProfile?.id ? [kepalaProfile.id] : [];
 const { data: paymentsBelumDisetor } = await dataClient
   .from('riwayat_pembayaran_cicilan')
   .select('nominal_bayar')
-  .in('diterima_oleh', kepalaReguIds.length ? kepalaReguIds : ['00000000-0000-0000-0000-000000000000'])
+  .in('diterima_oleh', penerimaKasIds.length ? penerimaKasIds : ['00000000-0000-0000-0000-000000000000'])
+  .in('anggota_id', anggotaReguIds.size ? [...anggotaReguIds] : ['00000000-0000-0000-0000-000000000000'])
   .is('setoran_regu_id', null);
 const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) => total + Number(payment.nominal_bayar || 0), 0);
 
@@ -268,7 +272,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
     <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
       <div>
         <span class="text-xs font-bold px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full">
-          {isReadOnlyReguViewer ? 'Mode Pemantauan Regu' : 'Portal Kepala Regu'} {reguKepala ? `- ${reguKepala}` : ''}
+          {isBendahara ? 'Mode Bendahara - Bertindak untuk Regu' : isReadOnlyReguViewer ? 'Mode Pemantauan Regu' : 'Portal Kepala Regu'} {reguKepala ? `- ${reguKepala}` : ''}
         </span>
         <h1 class="text-xl md:text-2xl font-black mt-2">{isReadOnlyReguViewer ? 'Pemantauan Anggota & Kewajiban Regu' : 'Pengelolaan Anggota & Kewajiban Regu'}</h1>
       </div>
@@ -292,7 +296,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
 
     {isReadOnlyReguViewer && !selectedRegu && (
       <div class="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
-        Pilih regu di atas untuk melihat anggota, kewajiban event, dan kas yang belum disetorkan. Mode ini hanya untuk pemantauan.
+        Pilih regu di atas untuk melihat anggota, kewajiban event, dan kas yang belum disetorkan. {isBendahara ? 'Setelah memilih regu, Anda dapat menerima pembayaran dan mengajukan setoran seperti Kepala Regu.' : 'Mode ini hanya untuk pemantauan.'}
       </div>
     )}
 
