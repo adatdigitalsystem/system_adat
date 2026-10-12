@@ -11,6 +11,7 @@ const currentPath = Astro.url.pathname;
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title}</title>
+    <link rel="icon" type="image/svg+xml" href="/logo_banjar.svg" />
   </head>
   <body class="bg-slate-100 min-h-screen font-sans antialiased text-slate-800">
     
@@ -20,9 +21,7 @@ const currentPath = Astro.url.pathname;
         
         <!-- Logo & Judul Banjar -->
         <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-xl bg-amber-500 flex items-center justify-center font-black text-slate-950 text-lg shadow">
-            🕉️️
-          </div>
+          <img src="/logo_banjar.svg" alt="Logo Banjar Adat Dharma Sadhu Dukuh" class="h-10 w-auto rounded-lg bg-white p-0.5 shadow" />
           <div>
             <span class="text-xs font-bold tracking-wider text-amber-400 uppercase">Banjar Adat</span>
             <h1 class="text-sm font-extrabold text-white leading-none">Dharma Sadhu Dukuh</h1>
