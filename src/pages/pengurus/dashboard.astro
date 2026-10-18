@@ -291,9 +291,10 @@ const labelKategoriKas = (category: string) => ({
         </div>
         <PrintReportButton targetId="pengurus-cash-report" title="Buku Kas Banjar" />
       </div>
-      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Cari buku kas</span><input type="search" data-report-search placeholder="Kategori, pihak, keterangan, bukti..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
-        <p data-report-summary class="text-xs text-slate-500 sm:pb-2" aria-live="polite"></p>
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Nama Dana / Kategori</span><input type="search" data-report-filter="category" placeholder="Cari nama dana atau kategori..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Keterangan</span><input type="search" data-report-filter="description" placeholder="Cari keterangan..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <p data-report-summary class="text-xs text-slate-500 sm:col-span-2" aria-live="polite"></p>
       </div>
       <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-4"><p class="text-xs text-emerald-800">Total Kas Masuk</p><p class="mt-1 text-lg font-black text-emerald-950">{formatRupiah(totalKasMasuk)}</p></div>
@@ -307,7 +308,7 @@ const labelKategoriKas = (category: string) => ({
           </thead>
           <tbody data-report-body class="divide-y divide-slate-100">
             {bukuKas.length ? bukuKas.map((entry) => (
-              <tr class="report-row hover:bg-slate-50" data-search={`${entry.nomorBukti} ${entry.kategori} ${entry.pihak} ${entry.keterangan} ${entry.metode || ''} ${entry.buktiUrl || ''}`.toLocaleLowerCase('id-ID')} data-date={entry.tanggal || ''} data-reference={entry.nomorBukti || ''} data-category={`${entry.kategori} ${entry.pihak}`} data-description={entry.keterangan || ''} data-debit={entry.debet} data-credit={entry.kredit} data-balance={entry.saldo} data-method={`${entry.metode || ''} ${entry.buktiUrl || ''}`}>
+              <tr class="report-row hover:bg-slate-50" data-search={`${entry.nomorBukti} ${entry.kategori} ${entry.pihak} ${entry.keterangan} ${entry.metode || ''} ${entry.buktiUrl || ''}`.toLocaleLowerCase('id-ID')} data-date={entry.tanggal || ''} data-reference={entry.nomorBukti || ''} data-category={`${labelKategoriKas(entry.kategori)} ${entry.pihak}`} data-description={entry.keterangan || ''} data-debit={entry.debet} data-credit={entry.kredit} data-balance={entry.saldo} data-method={`${entry.metode || ''} ${entry.buktiUrl || ''}`}>
                 <td class="whitespace-nowrap p-3">{entry.tanggal || '-'}</td>
                 <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">{entry.nomorBukti}</td>
                 <td class="p-3"><p class={`font-semibold ${entry.kredit > 0 ? 'text-red-800' : 'text-emerald-800'}`}>{labelKategoriKas(entry.kategori)}</p><p class="mt-1 text-slate-500">{entry.pihak}</p></td>
@@ -319,6 +320,9 @@ const labelKategoriKas = (category: string) => ({
               </tr>
             )) : <tr><td colspan="8" class="p-7 text-center text-slate-400">Belum ada transaksi kas masuk atau keluar.</td></tr>}
           </tbody>
+          <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
+            <tr><th colspan="4" class="p-3 text-right">Subtotal hasil pencarian</th><td data-search-subtotal-debit class="whitespace-nowrap p-3 text-right text-emerald-800">Rp0</td><td data-search-subtotal-credit class="whitespace-nowrap p-3 text-right text-red-800">Rp0</td><td data-search-subtotal-net class="whitespace-nowrap p-3 text-right">Rp0</td><td></td></tr>
+          </tfoot>
         </table>
       </div>
       <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -342,9 +346,10 @@ const labelKategoriKas = (category: string) => ({
         <div class="rounded-lg border border-amber-200 bg-amber-50 p-4"><p class="text-xs text-amber-800">Saldo Piutang Krama</p><p class="mt-1 text-lg font-black text-amber-950">{formatRupiah(totalSisa)}</p></div>
       </div>
       {selisihSaldoLegacy > 0 && <p class="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">Termasuk {formatRupiah(selisihSaldoLegacy)} saldo pembayaran lama tanpa rincian tanggal/transaksi, ditampilkan sebagai kredit rekonsiliasi.</p>}
-      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Cari buku besar</span><input type="search" data-report-search placeholder="Nama krama, bukti, keterangan, status..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
-        <p data-report-summary class="text-xs text-slate-500 sm:pb-2" aria-live="polite"></p>
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Nama Krama</span><input type="search" data-report-filter="member" placeholder="Cari nama krama..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Keterangan</span><input type="search" data-report-filter="description" placeholder="Cari keterangan..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <p data-report-summary class="text-xs text-slate-500 sm:col-span-2" aria-live="polite"></p>
       </div>
       <div class="overflow-x-auto rounded-lg border border-slate-200">
         <table class="w-full min-w-240 text-left text-xs text-slate-600">
@@ -364,6 +369,9 @@ const labelKategoriKas = (category: string) => ({
               </tr>
             )) : <tr><td colspan="9" class="p-7 text-center text-slate-400">Belum ada riwayat kewajiban krama.</td></tr>}
           </tbody>
+          <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
+            <tr><th colspan="5" class="p-3 text-right">Subtotal hasil pencarian</th><td data-search-subtotal-debit class="whitespace-nowrap p-3 text-right text-blue-800">Rp0</td><td data-search-subtotal-credit class="whitespace-nowrap p-3 text-right text-emerald-800">Rp0</td><td data-search-subtotal-net class="whitespace-nowrap p-3 text-right">Rp0</td><td></td></tr>
+          </tfoot>
         </table>
       </div>
       <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -379,6 +387,7 @@ const labelKategoriKas = (category: string) => ({
   document.querySelectorAll<HTMLElement>('[data-report-table]').forEach((report) => {
     const tableBody = report.querySelector<HTMLTableSectionElement>('[data-report-body]');
     const searchInput = report.querySelector<HTMLInputElement>('[data-report-search]');
+    const filterInputs = Array.from(report.querySelectorAll<HTMLInputElement>('[data-report-filter]'));
     const summary = report.querySelector<HTMLElement>('[data-report-summary]');
     const pageSizeSelect = report.querySelector<HTMLSelectElement>('[data-page-size]');
     const pageLinks = report.querySelector<HTMLElement>('[data-page-links]');
@@ -394,8 +403,24 @@ const labelKategoriKas = (category: string) => ({
 
     const update = () => {
       const allRows = Array.from(tableBody.querySelectorAll<HTMLTableRowElement>('.report-row'));
+      const filters = filterInputs.map((input) => ({
+        field: input.dataset.reportFilter || '',
+        query: input.value.trim().toLocaleLowerCase('id-ID'),
+      })).filter((filter) => filter.query);
       const query = searchInput?.value.trim().toLocaleLowerCase('id-ID') || '';
-      const matchingRows = allRows.filter((row) => (row.dataset.search || '').includes(query));
+      const matchingRows = allRows.filter((row) =>
+        (!query || (row.dataset.search || '').includes(query)) &&
+        filters.every((filter) => (row.dataset[filter.field] || '').toLocaleLowerCase('id-ID').includes(filter.query)),
+      );
+      const subtotalDebit = matchingRows.reduce((total, row) => total + Number(row.dataset.debit || 0), 0);
+      const subtotalCredit = matchingRows.reduce((total, row) => total + Number(row.dataset.credit || 0), 0);
+      const formatTotal = (amount: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(amount);
+      const subtotalDebitOutput = report.querySelector<HTMLElement>('[data-search-subtotal-debit]');
+      const subtotalCreditOutput = report.querySelector<HTMLElement>('[data-search-subtotal-credit]');
+      const subtotalNetOutput = report.querySelector<HTMLElement>('[data-search-subtotal-net]');
+      if (subtotalDebitOutput) subtotalDebitOutput.textContent = formatTotal(subtotalDebit);
+      if (subtotalCreditOutput) subtotalCreditOutput.textContent = formatTotal(subtotalCredit);
+      if (subtotalNetOutput) subtotalNetOutput.textContent = formatTotal(subtotalDebit - subtotalCredit);
       const pageSize = Number(pageSizeSelect.value || 10);
       const pageCount = Math.max(1, Math.ceil(matchingRows.length / pageSize));
       currentPage = Math.min(Math.max(1, currentPage), pageCount);
@@ -493,6 +518,10 @@ const labelKategoriKas = (category: string) => ({
       currentPage = 1;
       update();
     });
+    filterInputs.forEach((input) => input.addEventListener('input', () => {
+      currentPage = 1;
+      update();
+    }));
     pageSizeSelect.addEventListener('change', () => {
       currentPage = 1;
       update();
