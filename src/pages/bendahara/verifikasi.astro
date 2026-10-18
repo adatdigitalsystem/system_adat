@@ -1505,6 +1505,10 @@ const labelKategoriKas = (category: string) => ({
         </div>
       </div>
 
+      <div id="bendahara-cash-search" class="no-print grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Nama Dana / Kategori</span><input type="search" data-cash-filter="category" placeholder="Cari nama dana atau kategori..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+        <label class="block space-y-1"><span class="text-[11px] font-bold uppercase text-slate-500">Keterangan</span><input type="search" data-cash-filter="description" placeholder="Cari keterangan..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" /></label>
+      </div>
       <div class="max-h-136 overflow-auto rounded-lg border border-slate-200">
         <table class="w-full min-w-240 text-left text-xs text-slate-600">
           <thead class="sticky top-0 z-10 bg-slate-50 text-[10px] uppercase text-slate-500">
@@ -1534,6 +1538,10 @@ const labelKategoriKas = (category: string) => ({
                 data-edit-bukti={movement.editBukti}
                 data-edit-arah={movement.jenis}
                 data-member={movement.pihak}
+                data-search-category={`${labelKategoriKas(movement.kategori)} ${movement.pihak || ''}`.toLocaleLowerCase('id-ID')}
+                data-search-description={(movement.keterangan || '').toLocaleLowerCase('id-ID')}
+                data-search-debit={movement.debit}
+                data-search-credit={movement.kredit}
               >
                 <td class="whitespace-nowrap p-3">{movement.tanggal || '-'}</td>
                 <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">
@@ -1560,9 +1568,12 @@ const labelKategoriKas = (category: string) => ({
               <tr><td colspan="8" class="p-8 text-center text-slate-400">Belum ada transaksi kas masuk atau keluar.</td></tr>
             )}
           </tbody>
+          <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
+            <tr><th colspan="4" class="p-3 text-right">Subtotal hasil pencarian</th><td data-cash-subtotal-debit class="whitespace-nowrap p-3 text-right text-emerald-800">Rp0</td><td data-cash-subtotal-credit class="whitespace-nowrap p-3 text-right text-red-800">Rp0</td><td data-cash-subtotal-net class="whitespace-nowrap p-3 text-right">Rp0</td><td></td></tr>
+          </tfoot>
         </table>
       </div>
-      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-table-pagination="bendahara-cash-rows">
+      <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between" data-table-pagination="bendahara-cash-rows" data-search-controls="bendahara-cash-search">
         <div class="flex flex-wrap items-center gap-3">
           <label class="text-xs font-semibold text-slate-600">Baris per halaman
             <select data-page-size class="ml-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select>
@@ -1606,10 +1617,14 @@ const labelKategoriKas = (category: string) => ({
           Termasuk {formatRupiah(selisihSaldoLegacy)} saldo pembayaran lama yang tersimpan pada tagihan tetapi tidak memiliki rincian transaksi/tanggal. Ditampilkan sebagai kredit rekonsiliasi, bukan bukti pembayaran baru.
         </p>
       )}
-      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_180px_180px]">
+      <div class="no-print grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_180px_180px]">
         <label class="space-y-1">
-          <span class="text-[11px] font-bold uppercase text-slate-500">Cari anggota / keterangan / bukti</span>
-          <input id="history-search" type="search" placeholder="Nama, catatan, nomor bukti..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+          <span class="text-[11px] font-bold uppercase text-slate-500">Nama Krama</span>
+          <input id="history-member-search" type="search" placeholder="Cari nama krama..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
+        </label>
+        <label class="space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Keterangan</span>
+          <input id="history-description-search" type="search" placeholder="Cari keterangan..." class="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100" />
         </label>
         <label class="space-y-1">
           <span class="text-[11px] font-bold uppercase text-slate-500">Dari tanggal</span>
@@ -1676,6 +1691,7 @@ const labelKategoriKas = (category: string) => ({
                   data-debit={item.debit}
                   data-credit={item.kredit}
                   data-balance={item.saldoBerjalan}
+                  data-description={item.keteranganRiwayat || ''}
                   data-edit-type={item.tipe === 'TAGIHAN' ? 'tagihan' : item.tipe === 'PEMBAYARAN' ? 'pembayaran' : ''}
                   data-edit-id={item.tipe === 'TAGIHAN' ? item.billId : item.paymentId}
                   data-edit-date={item.tanggalSort || ''}
@@ -1776,6 +1792,9 @@ const labelKategoriKas = (category: string) => ({
               </tr>
             )}
           </tbody>
+          <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
+            <tr><th colspan="6" class="p-3 text-right">Subtotal hasil pencarian</th><td data-history-subtotal-debit class="whitespace-nowrap p-3 text-right text-blue-800">Rp0</td><td data-history-subtotal-credit class="whitespace-nowrap p-3 text-right text-emerald-800">Rp0</td><td data-history-subtotal-net class="whitespace-nowrap p-3 text-right">Rp0</td><td></td></tr>
+          </tfoot>
         </table>
         <div class="no-print flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div class="flex flex-wrap items-center gap-3">
@@ -2018,19 +2037,55 @@ const labelKategoriKas = (category: string) => ({
     const pageLinks = controls.querySelector<HTMLElement>('[data-page-links]');
     const previousButton = controls.querySelector<HTMLButtonElement>('[data-page-previous]');
     const nextButton = controls.querySelector<HTMLButtonElement>('[data-page-next]');
+    const searchControls = controls.dataset.searchControls
+      ? document.getElementById(controls.dataset.searchControls)
+      : null;
+    const filterInputs = Array.from(searchControls?.querySelectorAll<HTMLInputElement>('[data-cash-filter]') || []);
     let page = 1;
 
     const renderPagination = () => {
       if (!tableBody || !pageSizeSelect || !pageLinks) return;
-      const rows = Array.from(tableBody.querySelectorAll<HTMLTableRowElement>('.page-row'));
+      const allRows = Array.from(tableBody.querySelectorAll<HTMLTableRowElement>('.page-row'));
+      const filters = filterInputs.map((input) => ({
+        field: input.dataset.cashFilter || '',
+        query: input.value.trim().toLocaleLowerCase('id-ID'),
+      })).filter((filter) => filter.query);
+      const rows = allRows.filter((row) => filters.every((filter) =>
+        (row.dataset[`search${filter.field.charAt(0).toUpperCase()}${filter.field.slice(1)}`] || '').includes(filter.query),
+      ));
       const pageSize = Number(pageSizeSelect.value || 10);
       const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
       page = Math.min(Math.max(1, page), pageCount);
       const start = (page - 1) * pageSize;
       const end = Math.min(start + pageSize, rows.length);
 
-      rows.forEach((row, index) => row.classList.toggle('hidden', index < start || index >= end));
-      if (summary) summary.textContent = rows.length ? `Menampilkan ${start + 1}-${end} dari ${rows.length} baris` : 'Tidak ada data';
+      const visibleRows = new Set(rows.slice(start, end));
+      allRows.forEach((row) => row.classList.toggle('hidden', !visibleRows.has(row)));
+      let noResultsRow = tableBody.querySelector<HTMLTableRowElement>('[data-cash-no-results]');
+      if (!noResultsRow) {
+        noResultsRow = document.createElement('tr');
+        noResultsRow.dataset.cashNoResults = 'true';
+        noResultsRow.className = 'hidden';
+        const cell = document.createElement('td');
+        cell.colSpan = 8;
+        cell.className = 'p-8 text-center text-slate-400';
+        cell.textContent = 'Tidak ada transaksi yang cocok dengan pencarian.';
+        noResultsRow.append(cell);
+        tableBody.append(noResultsRow);
+      }
+      noResultsRow.classList.toggle('hidden', rows.length > 0 || allRows.length === 0);
+      const subtotalDebit = rows.reduce((total, row) => total + Number(row.dataset.searchDebit || 0), 0);
+      const subtotalCredit = rows.reduce((total, row) => total + Number(row.dataset.searchCredit || 0), 0);
+      const formatTotal = (amount: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(amount);
+      const debitOutput = document.querySelector<HTMLElement>('[data-cash-subtotal-debit]');
+      const creditOutput = document.querySelector<HTMLElement>('[data-cash-subtotal-credit]');
+      const netOutput = document.querySelector<HTMLElement>('[data-cash-subtotal-net]');
+      if (debitOutput) debitOutput.textContent = formatTotal(subtotalDebit);
+      if (creditOutput) creditOutput.textContent = formatTotal(subtotalCredit);
+      if (netOutput) netOutput.textContent = formatTotal(subtotalDebit - subtotalCredit);
+      if (summary) summary.textContent = rows.length
+        ? `Menampilkan ${start + 1}-${end} dari ${rows.length} baris`
+        : allRows.length ? 'Tidak ada hasil yang cocok' : 'Tidak ada data';
       if (previousButton) previousButton.disabled = page <= 1;
       if (nextButton) nextButton.disabled = page >= pageCount;
 
@@ -2071,6 +2126,10 @@ const labelKategoriKas = (category: string) => ({
       page = 1;
       renderPagination();
     });
+    filterInputs.forEach((input) => input.addEventListener('input', () => {
+      page = 1;
+      renderPagination();
+    }));
     previousButton?.addEventListener('click', () => {
       page -= 1;
       renderPagination();
@@ -2203,7 +2262,8 @@ const labelKategoriKas = (category: string) => ({
   const historyPageLinks = document.querySelector<HTMLElement>('#history-page-links');
   const historyPagePrevious = document.querySelector<HTMLButtonElement>('#history-page-previous');
   const historyPageNext = document.querySelector<HTMLButtonElement>('#history-page-next');
-  const historySearch = document.querySelector<HTMLInputElement>('#history-search');
+  const historyMemberSearch = document.querySelector<HTMLInputElement>('#history-member-search');
+  const historyDescriptionSearch = document.querySelector<HTMLInputElement>('#history-description-search');
   const historyDateFrom = document.querySelector<HTMLInputElement>('#history-date-from');
   const historyDateTo = document.querySelector<HTMLInputElement>('#history-date-to');
   let currentHistoryPage = 1;
@@ -2224,6 +2284,16 @@ const labelKategoriKas = (category: string) => ({
       const index = rows.indexOf(row);
       row.classList.toggle('hidden', index < 0 || index < startIndex || index >= endIndex);
     });
+
+    const subtotalDebit = rows.reduce((total, row) => total + Number(row.dataset.debit || 0), 0);
+    const subtotalCredit = rows.reduce((total, row) => total + Number(row.dataset.credit || 0), 0);
+    const formatTotal = (amount: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(amount);
+    const debitOutput = document.querySelector<HTMLElement>('[data-history-subtotal-debit]');
+    const creditOutput = document.querySelector<HTMLElement>('[data-history-subtotal-credit]');
+    const netOutput = document.querySelector<HTMLElement>('[data-history-subtotal-net]');
+    if (debitOutput) debitOutput.textContent = formatTotal(subtotalDebit);
+    if (creditOutput) creditOutput.textContent = formatTotal(subtotalCredit);
+    if (netOutput) netOutput.textContent = formatTotal(subtotalDebit - subtotalCredit);
 
     if (historyPageSummary) {
       historyPageSummary.textContent = rows.length
@@ -2275,16 +2345,18 @@ const labelKategoriKas = (category: string) => ({
 
   const applyHistoryFilters = () => {
     if (!historyRowsContainer) return;
-    const query = historySearch?.value.trim().toLocaleLowerCase('id-ID') || '';
+    const memberQuery = historyMemberSearch?.value.trim().toLocaleLowerCase('id-ID') || '';
+    const descriptionQuery = historyDescriptionSearch?.value.trim().toLocaleLowerCase('id-ID') || '';
     const dateFrom = historyDateFrom?.value || '';
     const dateTo = historyDateTo?.value || '';
 
     historyRowsContainer.querySelectorAll<HTMLTableRowElement>('.bendahara-history-row').forEach((row) => {
       const date = row.dataset.date || '';
-      const matchesQuery = !query || (row.dataset.search || '').includes(query);
+      const matchesMember = !memberQuery || (row.dataset.member || '').toLocaleLowerCase('id-ID').includes(memberQuery);
+      const matchesDescription = !descriptionQuery || (row.dataset.description || '').toLocaleLowerCase('id-ID').includes(descriptionQuery);
       const matchesFrom = !dateFrom || (date && date >= dateFrom);
       const matchesTo = !dateTo || (date && date <= dateTo);
-      row.dataset.filterHidden = String(!(matchesQuery && matchesFrom && matchesTo));
+      row.dataset.filterHidden = String(!(matchesMember && matchesDescription && matchesFrom && matchesTo));
     });
 
     currentHistoryPage = 1;
@@ -2331,7 +2403,8 @@ const labelKategoriKas = (category: string) => ({
   });
   sortHistory(activeHistorySort, activeHistoryDirection);
 
-  historySearch?.addEventListener('input', applyHistoryFilters);
+  historyMemberSearch?.addEventListener('input', applyHistoryFilters);
+  historyDescriptionSearch?.addEventListener('input', applyHistoryFilters);
   historyDateFrom?.addEventListener('change', applyHistoryFilters);
   historyDateTo?.addEventListener('change', applyHistoryFilters);
   applyHistoryFilters();
