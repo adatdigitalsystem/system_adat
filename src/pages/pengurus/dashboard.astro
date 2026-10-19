@@ -130,6 +130,27 @@ const totalDebet = riwayat.reduce((total, item) => total + item.debet, 0);
 const totalKredit = riwayat.reduce((total, item) => total + item.kredit, 0);
 const totalSisa = [...balanceByMember.values()].reduce((total, balance) => total + balance, 0);
 const selisihSaldoLegacy = riwayat.filter((item) => item.statusPembayaran === 'REKONSILIASI').reduce((total, item) => total + item.kredit, 0);
+const statusAnggotaChart = [
+  { label: 'Ngayah', value: (listAnggota || []).filter((member) => !member.status_aktif || member.status_aktif === 'AKTIF').length, color: 'bg-emerald-600' },
+  { label: 'Numbas Ayahan', value: (listAnggota || []).filter((member) => ['TIDAK_AKTIF', 'PASIF'].includes((member.status_aktif || '').toUpperCase())).length, color: 'bg-amber-500' },
+  { label: 'Belum dilengkapi', value: (listAnggota || []).filter((member) => member.status_aktif === 'BELUM_DILENGKAPI').length, color: 'bg-slate-400' },
+];
+const maxStatusAnggota = Math.max(1, ...statusAnggotaChart.map((item) => item.value));
+
+const saldoPerRegu = new Map<string, number>();
+for (const member of listAnggota || []) {
+  const balance = Math.max(0, balanceByMember.get(member.id) || 0);
+  if (!balance) continue;
+  const reguLabel = member.no_regu?.trim() ? `Regu ${member.no_regu.trim()}` : 'Tanpa regu';
+  saldoPerRegu.set(reguLabel, (saldoPerRegu.get(reguLabel) || 0) + balance);
+}
+const rankedSaldoRegu = [...saldoPerRegu.entries()]
+  .map(([label, value]) => ({ label, value }))
+  .sort((left, right) => right.value - left.value);
+const saldoReguChart = rankedSaldoRegu.length > 8
+  ? [...rankedSaldoRegu.slice(0, 7), { label: 'Regu lainnya', value: rankedSaldoRegu.slice(7).reduce((total, item) => total + item.value, 0) }]
+  : rankedSaldoRegu;
+const maxSaldoRegu = Math.max(1, ...saldoReguChart.map((item) => item.value));
 
 const cashMovements: any[] = [];
 for (const deposit of listDeposits || []) {
@@ -203,6 +224,26 @@ const labelKategoriKas = (category: string) => ({
   'Pembalikan Setoran': 'Pembalikan setoran',
 }[category] || category);
 
+const cashMonthKeys = Array.from({ length: 6 }, (_, index) => {
+  const date = new Date();
+  date.setDate(1);
+  date.setMonth(date.getMonth() - 5 + index);
+  return {
+    key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+    label: date.toLocaleDateString('id-ID', { month: 'short' }),
+  };
+});
+const cashByMonth = new Map(cashMonthKeys.map(({ key }) => [key, { debit: 0, credit: 0 }]));
+for (const entry of cashPeriod) {
+  if (entry.arah === 'SALDO_AWAL') continue;
+  const totals = cashByMonth.get(entry.tanggal?.slice(0, 7) || '');
+  if (!totals) continue;
+  totals.debit += entry.debet;
+  totals.credit += entry.kredit;
+}
+const monthlyCashChart = cashMonthKeys.map((month) => ({ ...month, ...cashByMonth.get(month.key)! }));
+const maxMonthlyCash = Math.max(1, ...monthlyCashChart.flatMap((month) => [month.debit, month.credit]));
+
 ---
 
 <LayoutDashboard title="Dashboard Pengurus (View-Only) - Banjar Adat" role={dashboardRole}>
@@ -232,6 +273,52 @@ const labelKategoriKas = (category: string) => ({
       <a href="/daftar-krama" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700">
         Buka Direktori Krama <span aria-hidden="true">&rarr;</span>
       </a>
+    </section>
+
+    <section class="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Grafik keanggotaan dan kewajiban">
+      <figure class="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <figcaption>
+          <h2 class="text-sm font-bold text-slate-900">Komposisi Status Anggota</h2>
+          <p class="mt-1 text-xs text-slate-500">Jumlah krama berdasarkan status keanggotaan saat ini.</p>
+        </figcaption>
+        <div class="mt-5 space-y-4">
+          {statusAnggotaChart.map((item) => (
+            <div>
+              <div class="mb-1.5 flex items-center justify-between gap-3 text-xs">
+                <span class="font-semibold text-slate-700">{item.label}</span>
+                <span class="tabular-nums text-slate-600">{item.value} anggota</span>
+              </div>
+              <div class="h-2.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                <div class={`h-full rounded-full ${item.color}`} style={`width:${(item.value / maxStatusAnggota) * 100}%`}></div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </figure>
+
+      <figure class="min-w-0 rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+        <figcaption>
+          <h2 class="text-sm font-bold text-slate-900">Sisa Kewajiban per Regu</h2>
+          <p class="mt-1 text-xs text-slate-500">Total saldo kewajiban positif anggota, diurutkan dari terbesar.</p>
+        </figcaption>
+        {saldoReguChart.length ? (
+          <div class="mt-5 space-y-3">
+            {saldoReguChart.map((item) => (
+              <div>
+                <div class="mb-1.5 flex items-center justify-between gap-3 text-xs">
+                  <span class="font-semibold text-slate-700">{item.label}</span>
+                  <span class="whitespace-nowrap tabular-nums text-slate-600">{formatRupiah(item.value)}</span>
+                </div>
+                <div class="h-2.5 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
+                  <div class="h-full rounded-full bg-amber-500" style={`width:${(item.value / maxSaldoRegu) * 100}%`}></div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p class="mt-5 rounded-md bg-slate-50 px-3 py-4 text-xs text-slate-500">Belum ada sisa kewajiban yang tercatat per regu.</p>
+        )}
+      </figure>
     </section>
 
     <section id="pengurus-event-report" data-report-table="events" class="space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:p-6">
