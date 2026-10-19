@@ -1,6 +1,7 @@
 ---
 import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
 import { supabase } from '../../lib/supabase';
+import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
 import { getGoogleDriveImageUrl } from '../../lib/googleDrivePublic';
 import { labelStatusKeanggotaan } from '../../lib/utils';
 import PrintReportButton from '../../components/common/PrintReportButton.astro';
@@ -65,6 +66,69 @@ const daftarTunggakan = (tagihanSemua || [])
     const jenis = tagihan.jenis_tagihan || tagihan.event_adat?.nama_event || (tagihan.keterangan?.match(/^\[([^\]]+)\]/)?.[1]) || 'Iuran';
     return { ...tagihan, jenis, sisa: Math.max(0, total - dibayar) };
   });
+// Akses sudah divalidasi lewat mayView; klien server dipakai agar riwayat pembayaran terbaca.
+const { data: paymentData } = await createSupabaseAdminClient()
+  .from('riwayat_pembayaran_cicilan')
+  .select('id, tagihan_krama_id, nominal_bayar, tanggal_bayar, metode_pembayaran, keterangan, created_at')
+  .eq('anggota_id', anggota.id);
+const payments = paymentData || [];
+const paidByBill = new Map<string, number>();
+for (const payment of payments) {
+  if (!payment.tagihan_krama_id) continue;
+  paidByBill.set(payment.tagihan_krama_id, (paidByBill.get(payment.tagihan_krama_id) || 0) + Number(payment.nominal_bayar || 0));
+}
+const toTimestamp = (date: string) => {
+  const value = Date.parse(`${date}T12:00:00`);
+  return Number.isNaN(value) ? 0 : value;
+};
+const ledgerRows: any[] = [];
+for (const bill of tagihanSemua || []) {
+  const date = bill.tanggal_kejadian || bill.created_at?.split('T')[0] || '';
+  const ts = toTimestamp(date);
+  ledgerRows.push({
+    id: `tagihan-${bill.id}`,
+    tanggal: date,
+    timestamp: ts,
+    order: 0,
+    noBukti: `TAG-${bill.id.slice(0, 8).toUpperCase()}`,
+    keterangan: bill.keterangan || bill.jenis_tagihan || bill.event_adat?.nama_event || 'Tagihan kewajiban',
+    debit: Number(bill.total_nominal ?? bill.nominal ?? 0),
+    kredit: 0,
+  });
+  const unitemized = Math.max(0, Number(bill.jumlah_dibayar || 0) - (paidByBill.get(bill.id) || 0));
+  if (unitemized > 0) {
+    ledgerRows.push({
+      id: `rekonsiliasi-${bill.id}`,
+      tanggal: date,
+      timestamp: ts,
+      order: 1,
+      noBukti: `SALDO-${bill.id.slice(0, 8).toUpperCase()}`,
+      keterangan: `Saldo pembayaran lama; rincian transaksi tidak tersedia (${bill.keterangan || 'tagihan'})`,
+      debit: 0,
+      kredit: unitemized,
+    });
+  }
+}
+for (const payment of payments) {
+  const date = payment.tanggal_bayar?.split('T')[0] || payment.created_at?.split('T')[0] || '';
+  const parsed = payment.tanggal_bayar ? Date.parse(payment.tanggal_bayar) : toTimestamp(date);
+  ledgerRows.push({
+    id: `pembayaran-${payment.id}`,
+    tanggal: date,
+    timestamp: Number.isNaN(parsed) ? 0 : parsed,
+    order: 2,
+    noBukti: `BYR-${payment.id.slice(0, 8).toUpperCase()}`,
+    keterangan: payment.keterangan || `Pembayaran ${payment.metode_pembayaran || 'diterima'}`,
+    debit: 0,
+    kredit: Number(payment.nominal_bayar || 0),
+  });
+}
+ledgerRows.sort((a, b) => a.timestamp - b.timestamp || a.order - b.order || a.id.localeCompare(b.id));
+let runningBalance = 0;
+for (const row of ledgerRows) {
+  runningBalance += row.debit - row.kredit;
+  row.saldo = runningBalance;
+}
 const totalTunggakan = daftarTunggakan.reduce((total, tagihan) => total + tagihan.sisa, 0);
 const totalDenda = daftarTunggakan
   .filter((tagihan) => /denda/i.test(`${tagihan.jenis} ${tagihan.keterangan || ''}`))
@@ -175,31 +239,27 @@ const formatTanggal = (value: string | null | undefined) => {
           <table class="w-full text-left text-sm text-slate-700">
             <thead class="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
-                <th class="p-3">Jenis Kewajiban</th>
+                <th class="p-3">Tanggal</th>
+                <th class="p-3">No. Bukti</th>
                 <th class="p-3">Keterangan</th>
-                <th class="p-3 text-right">Total</th>
-                <th class="p-3 text-right">Sudah Dibayar</th>
-                <th class="p-3 text-right">Sisa</th>
-                <th class="p-3 text-center">Status</th>
+                <th class="p-3 text-right">Debet</th>
+                <th class="p-3 text-right">Kredit</th>
+                <th class="p-3 text-right">Saldo</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-slate-100">
-              {daftarTunggakan.length ? daftarTunggakan.map((tagihan) => (
+              {ledgerRows.length ? ledgerRows.map((row) => (
                 <tr>
-                  <td class="p-3 font-semibold">{tagihan.jenis}</td>
-                  <td class="p-3">{tagihan.keterangan?.replace(/^\[[^\]]+\]\s*/, '') || '-'}</td>
-                  <td class="p-3 text-right">{formatRupiah(Number(tagihan.total_nominal ?? tagihan.nominal ?? 0))}</td>
-                  <td class="p-3 text-right">{formatRupiah(Number(tagihan.jumlah_dibayar || 0))}</td>
-                  <td class="p-3 text-right font-bold">{formatRupiah(tagihan.sisa)}</td>
-                  <td class="p-3 text-center">
-                    <span class="inline-block rounded-full bg-amber-100 px-2.5 py-1 text-xs font-bold text-amber-800">
-                      {tagihan.status_bayar}
-                    </span>
-                  </td>
+                  <td class="whitespace-nowrap p-3">{row.tanggal || '-'}</td>
+                  <td class="whitespace-nowrap p-3 font-mono text-xs font-semibold">{row.noBukti}</td>
+                  <td class="max-w-sm whitespace-pre-wrap p-3">{row.keterangan}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-semibold text-red-800">{row.debit > 0 ? formatRupiah(row.debit) : '-'}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-semibold text-emerald-800">{row.kredit > 0 ? formatRupiah(row.kredit) : '-'}</td>
+                  <td class="whitespace-nowrap p-3 text-right font-bold">{formatRupiah(row.saldo)}</td>
                 </tr>
               )) : (
                 <tr>
-                  <td colspan="6" class="p-8 text-center text-slate-500">Tidak ada tunggakan atau denda yang belum lunas.</td>
+                  <td colspan="6" class="p-8 text-center text-slate-500">Belum ada catatan tagihan.</td>
                 </tr>
               )}
             </tbody>
