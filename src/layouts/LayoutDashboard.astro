@@ -1,8 +1,27 @@
 ---
 import '../styles/global.css';
+import { supabase } from '../lib/supabase';
 
 const { title, role = 'KRAMA' } = Astro.props;
 const currentPath = Astro.url.pathname;
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+const { data: { user: sessionUser } } = accessToken ? await supabase.auth.getUser(accessToken) : { data: { user: null } };
+const { data: ownProfile } = sessionUser
+  ? await supabase.from('anggota').select('id').eq('user_id', sessionUser.id).maybeSingle()
+  : { data: null };
+const roleLinks = [
+  { href: '/admin/dashboard', prefix: '/admin', label: 'Panel Admin', roles: ['ADMIN'] },
+  { href: '/bendahara/verifikasi', prefix: '/bendahara', label: 'Portal Bendahara', roles: ['ADMIN', 'BENDAHARA'] },
+  { href: '/pengurus/dashboard', prefix: '/pengurus', label: 'Dashboard Pengurus', roles: ['ADMIN', 'PENGURUS'] },
+  { href: '/kepalaregu', prefix: '/kepalaregu', label: 'Portal Kepala Regu', roles: ['ADMIN', 'KEPALA_REGU'] },
+].filter((link) => link.roles.includes(role)).map((link) => ({ href: link.href, label: link.label, active: currentPath.startsWith(link.prefix) }));
+const navLinks = ownProfile
+  ? [...roleLinks, {
+      href: `/krama/detail?id=${ownProfile.id}`,
+      label: 'Profil Saya',
+      active: currentPath === '/krama/detail' && Astro.url.searchParams.get('id') === ownProfile.id,
+    }]
+  : roleLinks;
 ---
 
 <!DOCTYPE html>
@@ -35,37 +54,58 @@ const currentPath = Astro.url.pathname;
 
         <!-- Menu Navigasi Dinamis Berdasarkan Role -->
         <nav class="hidden md:flex items-center gap-1">
-          {role === 'ADMIN' && (
-            <a href="/admin/dashboard" class={`px-3 py-2 rounded-xl text-xs font-bold transition ${currentPath.startsWith('/admin') ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}>
-              Panel Admin
+          {navLinks.map((link) => (
+            <a href={link.href} class={`px-3 py-2 rounded-xl text-xs font-bold transition ${link.active ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}>
+              {link.label}
             </a>
-          )}
-          {(role === 'ADMIN' || role === 'BENDAHARA') && (
-            <a href="/bendahara/verifikasi" class={`px-3 py-2 rounded-xl text-xs font-bold transition ${currentPath.startsWith('/bendahara') ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}>
-              Portal Bendahara
-            </a>
-          )}
-          {(role === 'ADMIN' || role === 'PENGURUS') && (
-            <a href="/pengurus/dashboard" class={`px-3 py-2 rounded-xl text-xs font-bold transition ${currentPath.startsWith('/pengurus') ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}>
-              Dashboard Pengurus
-            </a>
-          )}
-          {(role === 'ADMIN' || role === 'KEPALA_REGU') && (
-            <a href="/kepalaregu" class={`px-3 py-2 rounded-xl text-xs font-bold transition ${currentPath.startsWith('/kepalaregu') ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}>
-              Portal Kepala Regu
-            </a>
-          )}
-
+          ))}
         </nav>
 
+        <div class="flex items-center gap-2">
+          {navLinks.length > 0 && (
+            <button
+              id="mobile-menu-button"
+              type="button"
+              class="md:hidden inline-flex h-9 w-9 items-center justify-center rounded-xl border border-slate-700 text-slate-200 hover:bg-slate-800"
+              aria-label="Buka menu"
+              aria-controls="mobile-menu"
+              aria-expanded="false"
+            >
+              <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+          )}
         <!-- Tombol Keluar Tunggal -->
         <form action="/api/auth/logout" method="POST" class="m-0">
           <button type="submit" class="px-3.5 py-2 bg-red-500/20 hover:bg-red-600 text-red-400 hover:text-white text-xs font-bold rounded-xl border border-red-500/30 transition">
             Keluar
           </button>
         </form>
+        </div>
       </div>
+
+      {navLinks.length > 0 && (
+        <nav id="mobile-menu" class="hidden md:hidden border-t border-slate-800 bg-slate-900 px-4 py-3">
+          <div class="flex flex-col gap-1">
+            {navLinks.map((link) => (
+              <a href={link.href} class={`px-3 py-2.5 rounded-xl text-sm font-bold transition ${link.active ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:bg-slate-800'}`}>
+                {link.label}
+              </a>
+            ))}
+          </div>
+        </nav>
+      )}
     </header>
+
+    <script>
+      const menuButton = document.getElementById('mobile-menu-button');
+      const mobileMenu = document.getElementById('mobile-menu');
+      menuButton?.addEventListener('click', () => {
+        const isHidden = mobileMenu?.classList.toggle('hidden');
+        menuButton.setAttribute('aria-expanded', String(!isHidden));
+      });
+    </script>
 
     <!-- Konten Utama -->
     <main class="py-6">
