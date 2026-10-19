@@ -575,6 +575,8 @@ const { data: listRegu } = await privilegedSupabase
   .from('regu')
   .select('id, nama_regu')
   .order('nama_regu', { ascending: true });
+const bendaharaDefaultReguId = import.meta.env.BENDAHARA_DEFAULT_REGU_ID?.trim();
+const bendaharaDefaultRegu = (listRegu || []).find((regu) => regu.id === bendaharaDefaultReguId);
 
 const { data: listEvent } = await privilegedSupabase
   .from('event_adat')
@@ -865,14 +867,16 @@ const labelKategoriKas = (category: string) => ({
         </svg>
         Direktori Krama
       </a>
-      <form action="/kepalaregu" method="GET" class="no-print flex flex-wrap items-center gap-2">
-        <label for="pilih-regu-lihat" class="text-xs font-semibold text-slate-300">Lihat regu:</label>
-        <select id="pilih-regu-lihat" name="regu" required class="rounded-lg border border-slate-600 bg-slate-800 px-2.5 py-2 text-xs text-white">
-          <option value="">Pilih regu</option>
-          {listRegu?.map((regu) => <option value={regu.id}>{regu.nama_regu}</option>)}
-        </select>
-        <button type="submit" class="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400">Buka Portal Regu</button>
-      </form>
+      <div class="no-print flex flex-col items-start gap-1">
+        {bendaharaDefaultRegu ? (
+          <a href={`/kepalaregu?regu=${encodeURIComponent(bendaharaDefaultRegu.id)}`} class="rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300">Buka Portal Regu</a>
+        ) : (
+          <>
+            <button type="button" disabled class="cursor-not-allowed rounded-lg bg-amber-500/50 px-3 py-2 text-xs font-bold text-slate-950/70">Buka Portal Regu</button>
+            <span class="max-w-56 text-[10px] text-amber-200">Atur BENDAHARA_DEFAULT_REGU_ID ke ID regu yang valid.</span>
+          </>
+        )}
+      </div>
     </div>
 
     {successMessage && (
