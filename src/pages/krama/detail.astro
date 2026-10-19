@@ -240,7 +240,7 @@ const formatTanggal = (value: string | null | undefined) => {
             <thead class="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th class="p-3">Tanggal</th>
-                <th class="p-3">No. Bukti</th>
+                <th class="hidden p-3 sm:table-cell">No. Bukti</th>
                 <th class="p-3">Keterangan</th>
                 <th class="p-3 text-right">Debet</th>
                 <th class="p-3 text-right">Kredit</th>
@@ -251,7 +251,7 @@ const formatTanggal = (value: string | null | undefined) => {
               {ledgerRows.length ? ledgerRows.map((row) => (
                 <tr>
                   <td class="whitespace-nowrap p-3">{row.tanggal || '-'}</td>
-                  <td class="whitespace-nowrap p-3 font-mono text-xs font-semibold">{row.noBukti}</td>
+                  <td class="hidden whitespace-nowrap p-3 font-mono text-xs font-semibold sm:table-cell">{row.noBukti}</td>
                   <td class="max-w-sm whitespace-pre-wrap p-3">{row.keterangan}</td>
                   <td class="whitespace-nowrap p-3 text-right font-semibold text-red-800">{row.debit > 0 ? formatRupiah(row.debit) : '-'}</td>
                   <td class="whitespace-nowrap p-3 text-right font-semibold text-emerald-800">{row.kredit > 0 ? formatRupiah(row.kredit) : '-'}</td>
