@@ -876,9 +876,16 @@ const expenseCategoryChart = [...expensesByCategory.entries()]
   .slice(0, 5);
 const maxExpenseCategory = Math.max(1, ...expenseCategoryChart.map((item) => item.value));
 
+const navToken = Astro.cookies.get('sb-access-token')?.value;
+const { data: { user: navUser } } = navToken ? await supabase.auth.getUser(navToken) : { data: { user: null } };
+const { data: navProfile } = navUser
+  ? await supabase.from('anggota').select('role').eq('user_id', navUser.id).maybeSingle()
+  : { data: null };
+const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : 'BENDAHARA';
+
 ---
 
-<LayoutDashboard title="Portal Bendahara - Adat Dukuh" role="BENDAHARA">
+<LayoutDashboard title="Portal Bendahara - Banjar Adat" role={navRole}>
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
     
     <!-- Header Bendahara -->
