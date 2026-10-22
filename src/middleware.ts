@@ -73,5 +73,9 @@ export const onRequest = defineMiddleware(async ({ request, cookies, redirect, u
     return redirect('/krama/dashboard', 302);
   }
 
+  if (currentPath.startsWith('/sinoman') && role !== 'ADMIN' && role !== 'SINOMAN' && role !== 'BENDAHARA') {
+    return redirect('/krama/dashboard', 302);
+  }
+  
   return next();
 });
