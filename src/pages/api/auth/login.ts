@@ -127,8 +127,9 @@ export const POST: APIRoute = async ({ request, cookies, redirect }) => {
       targetPath = '/bendahara/verifikasi';
     } else if (role === 'KEPALAREGU' || role === 'KEPALAREGM' || role === 'KEPALAREGUTEMPEKAN') {
       targetPath = '/kepalaregu';
+    } else if (role === 'SINOMAN') {
+      targetPath = '/sinoman';
     }
-
     return redirect(targetPath, 302);
   } catch (err: any) {
     const message = typeof err?.message === 'string' ? err.message : 'Terjadi kesalahan server';
