@@ -18,7 +18,7 @@ if (!memberId) return Astro.redirect('/krama/dashboard');
 
 const { data: viewer } = await supabase
   .from('anggota')
-  .select('id, role, no_regu')
+  .select('id, role, no_regu, tempekan')
   .eq('user_id', user.id)
   .maybeSingle();
 
@@ -27,6 +27,7 @@ if (!viewer) return Astro.redirect('/login');
 const viewerRole = (viewer.role || 'KRAMA').toUpperCase().replace(/[\\s_-]/g, '');
 const isAdmin = viewerRole === 'ADMIN';
 const isStaff = ['ADMIN', 'PENGURUS', 'BENDAHARA'].includes(viewerRole);
+const isSinoman = viewerRole === 'SINOMAN';
 const isKepalaRegu = ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes(viewerRole);
 
 const { data: anggota, error } = await supabase
@@ -39,13 +40,16 @@ if (error || !anggota) return Astro.redirect('/krama/dashboard');
 
 const mayView = isStaff
   || (isKepalaRegu && anggota.no_regu === viewer.no_regu)
+  || (isSinoman && anggota.tempekan && anggota.tempekan === viewer.tempekan)
   || (!isKepalaRegu && !isStaff && anggota.id === viewer.id);
 
 if (!mayView) return Astro.redirect('/krama/dashboard');
 
 const returnPath = isKepalaRegu
   ? '/kepalaregu'
-  : isAdmin
+  : isSinoman
+    ? '/sinoman'
+    : isAdmin
     ? '/admin/dashboard'
     : viewerRole === 'PENGURUS'
       ? '/pengurus/dashboard'
