@@ -297,7 +297,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
             <tbody class="divide-y divide-slate-100">
               {anggotaRegu && anggotaRegu.length > 0 ? (
                 anggotaRegu.map((item) => (
-                  <tr class="hover:bg-slate-50">
+                  <tr class="hover:bg-slate-50" data-member-row>
                     <td class="p-3 font-semibold text-slate-900">
                       <!-- Nama sebagai Hyperlink ke Detail Anggota -->
                       <a href={`/krama/detail?id=${item.id}`} class="text-blue-600 hover:underline flex items-center gap-2">
@@ -326,6 +326,14 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
               )}
             </tbody>
           </table>
+        </div>
+        <div id="anggota-pagination" class="no-print flex items-center justify-between gap-3 text-xs text-slate-600" hidden>
+          <span id="anggota-page-info"></span>
+          <div class="flex flex-wrap items-center gap-1" id="anggota-pages">
+            <button type="button" id="anggota-prev" aria-label="Halaman sebelumnya" class="rounded-lg border border-slate-300 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">&lt;</button>
+            <span id="anggota-numbers" class="flex flex-wrap items-center gap-1"></span>
+            <button type="button" id="anggota-next" aria-label="Halaman berikutnya" class="rounded-lg border border-slate-300 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">&gt;</button>
+          </div>
         </div>
       </div>
 
@@ -425,6 +433,21 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
                         </tr>
                       ))}
                     </tbody>
+                    <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
+                      {(() => {
+                        const subtotalKewajiban = tagihanEvent.reduce((sum, t) => sum + Number(t.total_nominal ?? t.nominal ?? 0), 0);
+                        const subtotalDikumpulkan = tagihanEvent.reduce((sum, t) => sum + Number(t.jumlah_dibayar || 0), 0);
+                        return (
+                          <tr>
+                            <td class="py-2.5" colspan="2">Subtotal</td>
+                            <td class="py-2.5 text-right">{formatRupiah(subtotalKewajiban)}</td>
+                            <td class="py-2.5 text-right">{formatRupiah(subtotalDikumpulkan)}</td>
+                            <td class="py-2.5 text-right">{formatRupiah(Math.max(0, subtotalKewajiban - subtotalDikumpulkan))}</td>
+                            <td></td>
+                          </tr>
+                        );
+                      })()}
+                    </tfoot>
                   </table>
                 </div>
               </div>
@@ -457,3 +480,51 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
 
   </div>
 </LayoutDashboard>
+
+<style is:global>
+  @media print {
+    tr[data-member-row] { display: table-row !important; }
+  }
+</style>
+
+<script>
+  const PAGE_SIZE = 10;
+  const rows = Array.from(document.querySelectorAll<HTMLElement>('[data-member-row]'));
+  const nav = document.getElementById('anggota-pagination');
+  const info = document.getElementById('anggota-page-info');
+  const prev = document.getElementById('anggota-prev') as HTMLButtonElement | null;
+  const next = document.getElementById('anggota-next') as HTMLButtonElement | null;
+  const numbers = document.getElementById('anggota-numbers');
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  let page = 1;
+
+  function render() {
+    rows.forEach((row, index) => {
+      row.style.display = Math.floor(index / PAGE_SIZE) + 1 === page ? '' : 'none';
+    });
+    if (info) info.textContent = `Halaman ${page} dari ${totalPages} (${rows.length} anggota)`;
+    if (prev) prev.disabled = page <= 1;
+    if (next) next.disabled = page >= totalPages;
+    if (numbers) {
+      numbers.replaceChildren(...Array.from({ length: totalPages }, (_, i) => {
+        const number = i + 1;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = String(number);
+        button.className = number === page
+          ? 'rounded-lg border border-blue-600 bg-blue-600 px-3 py-1.5 font-bold text-white'
+          : 'rounded-lg border border-slate-300 px-3 py-1.5 font-bold hover:bg-slate-50';
+        if (number === page) button.setAttribute('aria-current', 'page');
+        button.addEventListener('click', () => { page = number; render(); });
+        return button;
+      }));
+    }
+  }
+
+  if (nav && rows.length > PAGE_SIZE) {
+    nav.hidden = false;
+    prev?.addEventListener('click', () => { page -= 1; render(); });
+    next?.addEventListener('click', () => { page += 1; render(); });
+    render();
+  }
+</script>
