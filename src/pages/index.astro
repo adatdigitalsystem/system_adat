@@ -36,6 +36,8 @@ if (accessToken) {
       return Astro.redirect('/pengurus/dashboard');
     } else if (role === 'KEPALA_REGU' || role === 'KEPALA REGU' || role === 'KEPALA_REGU_TEMPEKAN') {
       return Astro.redirect('/kepalaregu');
+    } else if (role === 'SINOMAN') {
+      return Astro.redirect('/sinoman');
     } else {
       return Astro.redirect('/krama/dashboard');
     }
