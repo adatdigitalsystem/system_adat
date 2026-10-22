@@ -402,13 +402,24 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
             if (tagihanEvent.length === 0) return null; // Sembunyikan event jika tidak ada kewajiban
 
             return (
-              <div class="border border-slate-200 rounded-2xl p-4 space-y-3 bg-slate-50/50">
+              <div data-obligation-event class="border border-slate-200 rounded-2xl p-4 space-y-3 bg-slate-50/50">
                 <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-slate-200 pb-3">
                   <div>
                     <span class="text-[10px] font-bold px-2.5 py-0.5 bg-amber-100 text-amber-800 rounded-full">{evt.jenis_event}</span>
                     <h3 class="text-sm font-black text-slate-900 mt-1">{evt.nama_event}</h3>
                   </div>
-                  <span class="text-xs text-slate-500 font-medium">Tanggal: {evt.tanggal_event || '-'}</span>
+                  <div class="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+                    <label class="no-print">
+                      <span class="sr-only">Cari nama krama untuk event {evt.nama_event}</span>
+                      <input
+                        type="search"
+                        data-obligation-search
+                        placeholder="Cari nama krama..."
+                        class="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-700 placeholder:text-slate-400 sm:w-56"
+                      />
+                    </label>
+                    <span class="text-xs text-slate-500 font-medium">Tanggal: {evt.tanggal_event || '-'}</span>
+                  </div>
                 </div>
 
                 <div class="overflow-x-auto">
@@ -425,7 +436,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
                     </thead>
                     <tbody class="divide-y divide-slate-100">
                       {tagihanEvent.map((tagih) => (
-                        <tr>
+                        <tr data-obligation-row data-member-name={(tagih.anggota?.nama_lengkap || 'Krama').toLocaleLowerCase('id')}>
                           <td class="py-2.5 font-semibold text-slate-900">
                             <a href={`/krama/detail?id=${tagih.anggota_id}`} class="text-blue-600 hover:underline">
                               {tagih.anggota?.nama_lengkap || 'Krama'}
@@ -461,6 +472,9 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
                           </td>
                         </tr>
                       ))}
+                      <tr data-obligation-empty hidden>
+                        <td colspan="6" class="py-4 text-center text-slate-400 italic">Nama krama tidak ditemukan pada event ini.</td>
+                      </tr>
                     </tbody>
                     <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
                       {(() => {
@@ -513,6 +527,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
 <style is:global>
   @media print {
     tr[data-member-row] { display: table-row !important; }
+    tr[data-obligation-row] { display: table-row !important; }
   }
 </style>
 
@@ -556,4 +571,23 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
     next?.addEventListener('click', () => { page += 1; render(); });
     render();
   }
+
+  document.querySelectorAll<HTMLElement>('[data-obligation-event]').forEach((eventTable) => {
+    const search = eventTable.querySelector<HTMLInputElement>('[data-obligation-search]');
+    const obligationRows = Array.from(eventTable.querySelectorAll<HTMLTableRowElement>('[data-obligation-row]'));
+    const emptyState = eventTable.querySelector<HTMLTableRowElement>('[data-obligation-empty]');
+
+    search?.addEventListener('input', () => {
+      const query = search.value.trim().toLocaleLowerCase('id');
+      let visibleRows = 0;
+
+      obligationRows.forEach((row) => {
+        const matches = (row.dataset.memberName || '').includes(query);
+        row.hidden = !matches;
+        if (matches) visibleRows += 1;
+      });
+
+      if (emptyState) emptyState.hidden = visibleRows > 0;
+    });
+  });
 </script>
