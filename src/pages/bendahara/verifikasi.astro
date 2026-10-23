@@ -5,6 +5,18 @@ import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
 import { labelStatusKeanggotaan } from '../../lib/utils';
 import PrintReportButton from '../../components/common/PrintReportButton.astro';
 
+const targetRoles = [
+  { value: 'KRAMA', label: 'Krama' },
+  { value: 'KEPALA_REGU', label: 'Kepala Regu' },
+  { value: 'SINOMAN', label: 'Sinoman' },
+  { value: 'BENDAHARA', label: 'Bendahara' },
+  { value: 'PENGURUS', label: 'Pengurus' },
+  { value: 'ADMIN', label: 'Admin' },
+] as const;
+const normalizeRole = (role: string | null | undefined) => (role || 'KRAMA').toUpperCase().replace(/[\s_-]/g, '');
+const labelTargetRole = (role: string) =>
+  targetRoles.find((targetRole) => normalizeRole(targetRole.value) === normalizeRole(role))?.label || role;
+
 let errorMessage = '';
 let successMessage = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 const formatRupiah = (val: number) =>
@@ -499,18 +511,23 @@ if (Astro.request.method === 'POST') {
       const tarif_default = formData.get('tarif_default');
       const tanggal_event = formData.get('tanggal_event');
       const requestedTarget = formData.get('target_status_keanggotaan')?.toString() || 'SEMUA';
+      const requestedRoles = formData.getAll('target_roles').map((role) => role.toString().toUpperCase());
+      const invalidRoles = requestedRoles.filter((role) => !targetRoles.some((targetRole) => targetRole.value === role));
+      if (invalidRoles.length) throw new Error('Pilihan role yang dikenai tidak valid.');
+      const target_roles = [...new Set(requestedRoles)];
+      if (!target_roles.length) throw new Error('Pilih minimal satu role yang dikenai tagihan.');
       const target_status_keanggotaan = jenis_event === 'TAHUNAN'
         ? 'TIDAK_AKTIF'
         : ['AKTIF', 'SEMUA'].includes(requestedTarget) ? requestedTarget : 'SEMUA';
 
       const { data: event, error: eventError } = await privilegedSupabase.from('event_adat').insert([
-        { nama_event, jenis_event, tarif_default, tanggal_event, target_status_keanggotaan }
+        { nama_event, jenis_event, tarif_default, tanggal_event, target_status_keanggotaan, target_roles }
       ]).select('id').single();
       if (eventError) throw eventError;
 
       const { data: anggotaList, error: anggotaError } = await privilegedSupabase
         .from('anggota')
-        .select('id, status_aktif');
+        .select('id, status_aktif, role');
       if (anggotaError) {
         await privilegedSupabase.from('event_adat').delete().eq('id', event.id);
         throw anggotaError;
@@ -518,14 +535,15 @@ if (Astro.request.method === 'POST') {
 
       const anggotaTertagih = (anggotaList || []).filter((anggota) => {
         const statusAktif = anggota.status_aktif || 'AKTIF';
-        if (target_status_keanggotaan === 'TIDAK_AKTIF') return statusAktif === 'TIDAK_AKTIF';
-        if (target_status_keanggotaan === 'AKTIF') return statusAktif === 'AKTIF';
-        return statusAktif === 'AKTIF' || statusAktif === 'TIDAK_AKTIF';
+        if (target_status_keanggotaan === 'TIDAK_AKTIF' && statusAktif !== 'TIDAK_AKTIF') return false;
+        if (target_status_keanggotaan === 'AKTIF' && statusAktif !== 'AKTIF') return false;
+        if (statusAktif !== 'AKTIF' && statusAktif !== 'TIDAK_AKTIF') return false;
+        return target_roles.some((role) => normalizeRole(role) === normalizeRole(anggota.role));
       });
 
       if (!anggotaTertagih.length) {
         await privilegedSupabase.from('event_adat').delete().eq('id', event.id);
-        throw new Error('Tidak ada anggota dengan status yang dipilih untuk menerima tagihan. Event tidak disimpan.');
+        throw new Error('Tidak ada anggota dengan status dan role yang dipilih untuk menerima tagihan. Event tidak disimpan.');
       }
 
       const tagihanEvent = anggotaTertagih.map((anggota) => ({
@@ -1227,6 +1245,19 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
             <p id="target-status-note" class="mt-1 text-[10px] text-slate-500">Iuran tahunan otomatis dikenakan hanya kepada Numbas Ayahan.</p>
           </div>
 
+          <fieldset class="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <legend class="px-1 text-[11px] font-bold uppercase text-slate-600">Role yang Dikenai</legend>
+            <p class="mb-2 text-[10px] text-slate-500">Pilih satu atau lebih role. Role yang tidak dicentang tidak akan menerima tagihan.</p>
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {targetRoles.map((role) => (
+                <label class="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs text-slate-700">
+                  <input type="checkbox" name="target_roles" value={role.value} checked class="h-4 w-4 rounded border-slate-300 text-amber-500 focus:ring-amber-500" />
+                  <span>{role.label}</span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
           <div>
             <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Tanggal Pelaksanaan</label>
             <input type="date" name="tanggal_event" required class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
@@ -1477,7 +1508,8 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
             <tr>
               <th class="p-3">Nama Event</th>
               <th class="p-3">Jenis</th>
-              <th class="p-3">Dikenakan Kepada</th>
+              <th class="p-3">Status Keanggotaan</th>
+              <th class="p-3">Role yang Dikenai</th>
               <th class="p-3 text-right">Tarif Default</th>
               <th class="p-3 text-center">Tanggal Pelaksanaan</th>
             </tr>
@@ -1489,13 +1521,14 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
                   <td class="p-3 font-semibold text-slate-900">{evt.nama_event}</td>
                   <td class="p-3"><span class="px-2 py-0.5 bg-slate-100 rounded-full font-bold text-[10px]">{evt.jenis_event}</span></td>
                   <td class="p-3">{evt.target_status_keanggotaan === 'TIDAK_AKTIF' ? labelStatusKeanggotaan('TIDAK_AKTIF') : evt.target_status_keanggotaan === 'AKTIF' ? labelStatusKeanggotaan('AKTIF') : 'Ngayah & Numbas Ayahan'}</td>
+                  <td class="p-3">{Array.isArray(evt.target_roles) ? evt.target_roles.map((role: string) => labelTargetRole(role)).join(', ') : 'Semua role'}</td>
                   <td class="p-3 text-right font-bold text-slate-900">{formatRupiah(evt.tarif_default)}</td>
                   <td class="p-3 text-center">{evt.tanggal_event || '-'}</td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td colspan="5" class="p-6 text-center text-slate-400 italic">Belum ada event adat terdaftar.</td>
+                <td colspan="6" class="p-6 text-center text-slate-400 italic">Belum ada event adat terdaftar.</td>
               </tr>
             )}
           </tbody>
