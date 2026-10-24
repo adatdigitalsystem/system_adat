@@ -12,6 +12,8 @@ let profile: any = null;
 let listTagihan: any[] = [];
 let totalTunggakan = 0;
 let ledgerRows: any[] = [];
+let anggotaRegu: any[] = [];
+let anggotaReguError = '';
 
 if (accessToken) {
   const { data: { user } } = await supabase.auth.getUser(accessToken);
@@ -25,6 +27,17 @@ if (accessToken) {
     profile = profileData;
 
     if (profile) {
+      if (profile.no_regu?.trim()) {
+        const { data: anggotaReguData, error: anggotaReguQueryError } = await createSupabaseAdminClient()
+          .from('anggota')
+          .select('id, nama_lengkap, no_regu, no_hp, alamat, role, foto_url, foto, foto_drive_id')
+          .eq('no_regu', profile.no_regu.trim())
+          .order('nama_lengkap', { ascending: true });
+
+        anggotaRegu = anggotaReguData || [];
+        anggotaReguError = anggotaReguQueryError?.message || '';
+      }
+
       const { data: tagihanData } = await supabase
         .from('tagihan_krama')
         .select('*, event_adat(nama_event)')
@@ -207,6 +220,65 @@ const formatRupiah = (val: number) =>
         </table>
       </div>
     </div>
+
+    <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <div class="mb-5">
+        <p class="text-xs font-bold uppercase text-blue-700">Direktori Regu</p>
+        <h2 class="mt-1 text-base font-bold text-slate-900">
+          Anggota Regu {profile?.no_regu?.trim() ? profile.no_regu : '-'}
+        </h2>
+        <p class="mt-1 text-xs text-slate-500">Daftar anggota dengan nomor regu yang sama dengan Anda.</p>
+      </div>
+
+      {anggotaReguError && (
+        <p role="alert" class="rounded-lg border border-red-200 bg-red-50 p-4 text-sm font-semibold text-red-800">
+          Gagal memuat daftar anggota regu: {anggotaReguError}
+        </p>
+      )}
+
+      {!profile?.no_regu?.trim() ? (
+        <p class="rounded-lg bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+          Nomor regu Anda belum tercatat.
+        </p>
+      ) : anggotaReguError ? null : anggotaRegu.length ? (
+        <ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {anggotaRegu.map((item) => (
+            <li class="flex gap-4 rounded-lg border border-slate-200 p-4">
+              <ProfilePhoto
+                src={getGoogleDriveImageUrl(item.foto_url || item.foto || item.foto_drive_id)}
+                alt={`Foto ${item.nama_lengkap}`}
+                fallbackText={item.nama_lengkap?.trim().charAt(0).toLocaleUpperCase('id-ID') || '?'}
+                className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-amber-100"
+                imageClass="h-full w-full object-cover"
+                fallbackClass="flex h-full w-full items-center justify-center rounded-full text-xl font-black text-amber-900"
+              />
+              <dl class="min-w-0 space-y-2 text-sm">
+                <div>
+                  <dt class="sr-only">Nama</dt>
+                  <dd class="break-words font-bold text-slate-900">{item.nama_lengkap || '-'}</dd>
+                </div>
+                <div>
+                  <dt class="text-[10px] font-bold uppercase text-slate-500">Kontak</dt>
+                  <dd class="break-words text-slate-700">{item.no_hp || '-'}</dd>
+                </div>
+                <div>
+                  <dt class="text-[10px] font-bold uppercase text-slate-500">Alamat</dt>
+                  <dd class="whitespace-pre-wrap break-words text-slate-700">{item.alamat || '-'}</dd>
+                </div>
+                <div>
+                  <dt class="text-[10px] font-bold uppercase text-slate-500">Role</dt>
+                  <dd class="text-slate-700">{item.role || 'KRAMA'}</dd>
+                </div>
+              </dl>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p class="rounded-lg bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+          Belum ada anggota lain yang terdaftar pada regu ini.
+        </p>
+      )}
+    </section>
 
   </div>
 </LayoutDashboard>
