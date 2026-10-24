@@ -270,9 +270,14 @@ const maxMonthlyCash = Math.max(1, ...monthlyCashChart.flatMap((month) => [month
         <p class="mt-1 text-sm text-slate-500">Lihat foto, informasi profil, dan saldo kewajiban seluruh anggota.</p>
         <p class="mt-3 text-xs font-semibold text-slate-600">{listAnggota?.length || 0} anggota · {totalAktif} Ngayah · {formatRupiah(totalSisa)} sisa kewajiban</p>
       </div>
-      <a href="/daftar-krama" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700">
-        Buka Direktori Krama <span aria-hidden="true">&rarr;</span>
-      </a>
+      <div class="flex flex-col gap-2 sm:flex-row">
+        <a href="/daftar-krama" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700">
+          Buka Direktori Krama <span aria-hidden="true">&rarr;</span>
+        </a>
+        <a href="/pengurus/direktori-regu" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-amber-500 bg-amber-400 px-4 py-2.5 text-sm font-bold text-slate-950 transition hover:bg-amber-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-500">
+          Direktori Regu <span aria-hidden="true">&rarr;</span>
+        </a>
+      </div>
     </section>
 
     <section class="grid grid-cols-1 gap-4 xl:grid-cols-2" aria-label="Grafik keanggotaan dan kewajiban">
