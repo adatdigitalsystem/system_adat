@@ -2,8 +2,10 @@
 import LayoutDashboard from '../../layouts/LayoutDashboard.astro';
 import { supabase } from '../../lib/supabase';
 import { createSupabaseAdminClient } from '../../lib/supabaseAdmin';
+import { getGoogleDriveImageUrl } from '../../lib/googleDrivePublic';
 import { labelStatusKeanggotaan } from '../../lib/utils';
 import PrintReportButton from '../../components/common/PrintReportButton.astro';
+import ProfilePhoto from '../../components/common/ProfilePhoto.astro';
 
 let notice = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 let noticeIsError = false;
@@ -284,6 +286,17 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
           </div>
         </div>
 
+        <label class="block max-w-md space-y-1">
+          <span class="text-[11px] font-bold uppercase text-slate-500">Cari nama anggota</span>
+          <input
+            id="anggota-search"
+            type="search"
+            placeholder="Ketik nama anggota..."
+            class="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100"
+            autocomplete="off"
+          />
+        </label>
+
         <div class="overflow-x-auto">
           <table class="w-full text-xs text-left text-slate-600">
             <thead class="bg-slate-50 text-slate-500 uppercase border-b border-slate-200">
@@ -297,11 +310,19 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
             <tbody class="divide-y divide-slate-100">
               {anggotaRegu && anggotaRegu.length > 0 ? (
                 anggotaRegu.map((item) => (
-                  <tr class="hover:bg-slate-50" data-member-row>
+                  <tr class="hover:bg-slate-50" data-member-row data-member-name={item.nama_lengkap || ''}>
                     <td class="p-3 font-semibold text-slate-900">
                       <!-- Nama sebagai Hyperlink ke Detail Anggota -->
                       <a href={`/krama/detail?id=${item.id}`} class="text-blue-600 hover:underline flex items-center gap-2">
-                        <span>👤</span> {item.nama_lengkap}
+                        <ProfilePhoto
+                          src={getGoogleDriveImageUrl(item.foto_url || item.foto || item.foto_drive_id)}
+                          alt={`Foto ${item.nama_lengkap}`}
+                          fallbackText={item.nama_lengkap?.trim().charAt(0).toLocaleUpperCase('id-ID') || '?'}
+                          className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-amber-100"
+                          imageClass="h-full w-full object-cover"
+                          fallbackClass="flex h-full w-full items-center justify-center rounded-full text-sm font-black text-amber-900"
+                        />
+                        <span>{item.nama_lengkap}</span>
                       </a>
                     </td>
                     <td class="p-3">{item.tempekan || '-'}</td>
@@ -324,6 +345,9 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
                   <td colspan="4" class="p-6 text-center text-slate-400 italic">Tidak ada anggota terdaftar dalam tempekan ini.</td>
                 </tr>
               )}
+              <tr id="anggota-search-empty" hidden>
+                <td colspan="4" class="p-6 text-center text-slate-400 italic">Tidak ada anggota yang cocok dengan nama tersebut.</td>
+              </tr>
             </tbody>
           </table>
         </div>
@@ -510,16 +534,24 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
   const prev = document.getElementById('anggota-prev') as HTMLButtonElement | null;
   const next = document.getElementById('anggota-next') as HTMLButtonElement | null;
   const numbers = document.getElementById('anggota-numbers');
-  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const search = document.getElementById('anggota-search') as HTMLInputElement | null;
+  const emptyState = document.getElementById('anggota-search-empty');
+  let filteredRows = rows;
   let page = 1;
 
   function render() {
-    rows.forEach((row, index) => {
+    const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+    rows.forEach((row) => {
+      row.style.display = 'none';
+    });
+    filteredRows.forEach((row, index) => {
       row.style.display = Math.floor(index / PAGE_SIZE) + 1 === page ? '' : 'none';
     });
-    if (info) info.textContent = `Halaman ${page} dari ${totalPages} (${rows.length} anggota)`;
+    if (emptyState) emptyState.hidden = filteredRows.length > 0 || !search?.value.trim();
+    if (info) info.textContent = `Halaman ${page} dari ${totalPages} (${filteredRows.length} anggota)`;
     if (prev) prev.disabled = page <= 1;
     if (next) next.disabled = page >= totalPages;
+    if (nav) nav.hidden = filteredRows.length <= PAGE_SIZE;
     if (numbers) {
       numbers.replaceChildren(...Array.from({ length: totalPages }, (_, i) => {
         const number = i + 1;
@@ -536,12 +568,18 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
     }
   }
 
-  if (nav && rows.length > PAGE_SIZE) {
-    nav.hidden = false;
-    prev?.addEventListener('click', () => { page -= 1; render(); });
-    next?.addEventListener('click', () => { page += 1; render(); });
+  search?.addEventListener('input', () => {
+    const query = search.value.trim().toLocaleLowerCase('id');
+    filteredRows = rows.filter((row) => (row.dataset.memberName || '').toLocaleLowerCase('id').includes(query));
+    page = 1;
     render();
-  }
+  });
+  prev?.addEventListener('click', () => { page = Math.max(1, page - 1); render(); });
+  next?.addEventListener('click', () => {
+    page = Math.min(Math.ceil(filteredRows.length / PAGE_SIZE), page + 1);
+    render();
+  });
+  render();
 
   document.querySelectorAll<HTMLElement>('[data-obligation-event]').forEach((eventTable) => {
     const search = eventTable.querySelector<HTMLInputElement>('[data-obligation-search]');
