@@ -307,7 +307,7 @@ const totalBelumDisetor = (paymentsBelumDisetor || []).reduce((total, payment) =
       <!-- Kolom 1 & 2: Daftar Anggota Regu (Tanpa No Telp, Nama sebagai Hyperlink) -->
       <div id="kepalaregu-anggota-report" class="lg:col-span-2 bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
         <div class="flex justify-between items-center">
-          <h2 class="text-base font-bold text-slate-800">Daftar Anggota Krama di Regu Anda (Regu {reguKepala || '-'})</h2>
+          <h2 class="text-base font-bold text-slate-800">(Regu {reguKepala || '-'})</h2>
           <div class="flex items-center gap-3">
             <span class="text-xs text-slate-500">Total: {anggotaRegu?.length || 0} Orang</span>
             <PrintReportButton targetId="kepalaregu-anggota-report" title={`Daftar Anggota Regu ${reguKepala || ''}`} />
