@@ -2,6 +2,10 @@ import type { APIRoute } from 'astro';
 import { supabase } from '../../lib/supabase';
 
 export const GET: APIRoute = async () => {
+  if (import.meta.env.PROD) {
+    return new Response('Not Found', { status: 404 });
+  }
+
   const accountList = [
     { email: 'krama@banjar.com', password: 'password123', phone: '081234567890' },
     { email: 'kepalaregu@banjar.com', password: 'password123', phone: '081234567891' },
