@@ -3,6 +3,16 @@ import '../styles/global.css';
 import { supabase } from '../lib/supabase';
 
 const { title, role = 'KRAMA' } = Astro.props;
+const normalizedRole = String(role).toUpperCase().replace(/[\s_-]/g, '');
+const idleTimeoutMinutes = [
+  'ADMIN',
+  'PENGURUS',
+  'BENDAHARA',
+  'SINOMAN',
+  'KEPALAREGU',
+  'KEPALAREGM',
+  'KEPALAREGUTEMPEKAN',
+].includes(normalizedRole) ? 15 : 5;
 const currentPath = Astro.url.pathname;
 const accessToken = Astro.cookies.get('sb-access-token')?.value;
 const { data: { user: sessionUser } } = accessToken ? await supabase.auth.getUser(accessToken) : { data: { user: null } };
@@ -32,7 +42,10 @@ const navLinks = ownProfile
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{title}</title>
   </head>
-  <body class="bg-slate-100 min-h-screen font-sans antialiased text-slate-800">
+  <body
+    class="bg-slate-100 min-h-screen font-sans antialiased text-slate-800"
+    data-idle-timeout-minutes={idleTimeoutMinutes}
+  >
     
     <!-- Navbar Utama -->
     <header class="bg-slate-900 border-b border-slate-800 sticky top-0 z-50">
@@ -106,6 +119,30 @@ const navLinks = ownProfile
         const isHidden = mobileMenu?.classList.toggle('hidden');
         menuButton.setAttribute('aria-expanded', String(!isHidden));
       });
+
+      const idleTimeoutMinutes = Number(document.body.dataset.idleTimeoutMinutes || '5');
+      let idleLogoutTimer: ReturnType<typeof setTimeout>;
+
+      const logoutAfterIdle = async () => {
+        try {
+          await fetch('/api/auth/logout', { method: 'POST' });
+        } finally {
+          window.location.replace('/login');
+        }
+      };
+
+      const resetIdleLogoutTimer = () => {
+        clearTimeout(idleLogoutTimer);
+        idleLogoutTimer = setTimeout(logoutAfterIdle, idleTimeoutMinutes * 60 * 1000);
+      };
+
+      ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'].forEach((eventName) => {
+        document.addEventListener(eventName, resetIdleLogoutTimer, { passive: true });
+      });
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') resetIdleLogoutTimer();
+      });
+      resetIdleLogoutTimer();
     </script>
 
     <!-- Konten Utama -->
