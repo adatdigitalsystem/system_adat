@@ -275,12 +275,56 @@ if (Astro.request.method === 'POST') {
       const tagihanId = formData.get('tagihan_id')?.toString();
       const nominalBayar = Number(formData.get('nominal_bayar'));
       const tanggalBayar = formData.get('tanggal_bayar')?.toString() || new Date().toISOString().slice(0, 10);
-      const keteranganBayar = formData.get('keterangan')?.toString().trim() || 'Pembayaran Numbas Ayahan';
+      const keteranganBayar = formData.get('keterangan')?.toString().trim() || 'Pembayaran dari Krama';
 
       if (!tagihanId || !Number.isFinite(nominalBayar) || nominalBayar <= 0) {
         throw new Error('Pilih tagihan dan masukkan nominal pembayaran yang valid.');
       }
 
+      if (tagihanId.startsWith('SALDO:')) {
+        const memberId = tagihanId.slice('SALDO:'.length);
+        const { data: member, error: memberError } = await privilegedSupabase
+          .from('anggota')
+          .select('id, nama_lengkap')
+          .eq('id', memberId)
+          .maybeSingle();
+        if (memberError) throw memberError;
+        if (!member) throw new Error('Krama tidak ditemukan.');
+
+        const [{ data: memberBills, error: memberBillsError }, { data: memberPayments, error: memberPaymentsError }] = await Promise.all([
+          privilegedSupabase.from('tagihan_krama').select('id, total_nominal, nominal, jumlah_dibayar').eq('anggota_id', memberId),
+          privilegedSupabase.from('riwayat_pembayaran_cicilan').select('tagihan_krama_id, nominal_bayar').eq('anggota_id', memberId),
+        ]);
+        if (memberBillsError) throw memberBillsError;
+        if (memberPaymentsError) throw memberPaymentsError;
+
+        let saldoKewajiban = 0;
+        for (const bill of memberBills || []) {
+          const nominal = Number(bill.total_nominal ?? bill.nominal ?? 0);
+          const recordedPaid = Number(bill.jumlah_dibayar || 0);
+          saldoKewajiban += nominal - recordedPaid;
+        }
+        for (const payment of memberPayments || []) {
+          if (!payment.tagihan_krama_id) saldoKewajiban -= Number(payment.nominal_bayar || 0);
+        }
+        saldoKewajiban = Math.max(0, saldoKewajiban);
+        if (nominalBayar > saldoKewajiban) throw new Error('Nominal pembayaran melebihi saldo kewajiban Krama.');
+
+        const { error: receiptError } = await privilegedSupabase
+          .from('riwayat_pembayaran_cicilan')
+          .insert({
+            tagihan_krama_id: null,
+            anggota_id: memberId,
+            diterima_oleh: actor.id,
+            nominal_bayar: nominalBayar,
+            tanggal_bayar: new Date(`${tanggalBayar}T12:00:00`).toISOString(),
+            metode_pembayaran: 'CASH_BENDAHARA',
+            keterangan: keteranganBayar,
+          });
+        if (receiptError) throw receiptError;
+        successMessage = `Pembayaran saldo ${formatRupiah(nominalBayar)} untuk ${member.nama_lengkap} berhasil dicatat.`;
+      }
+      else {
       const { data: tagihan, error: tagihanError } = await privilegedSupabase
         .from('tagihan_krama')
         .select('id, anggota_id, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, status_aktif)')
@@ -334,7 +378,8 @@ if (Astro.request.method === 'POST') {
         throw updateTagihanError;
       }
 
-      successMessage = `Pembayaran Numbas Ayahan ${formatRupiah(nominalBayar)} untuk ${anggotaPasif?.nama_lengkap || 'anggota'} berhasil dicatat.`;
+      successMessage = `Pembayaran Krama ${formatRupiah(nominalBayar)} untuk ${anggotaPasif?.nama_lengkap || 'anggota'} berhasil dicatat.`;
+      }
     }
     else if (action === 'edit_transaksi_kas') {
       const kasId = formData.get('kas_id')?.toString();
@@ -761,6 +806,7 @@ const totalSaldoLedger = [...saldoBerjalanByAnggota.values()].reduce((total, sal
 const anggotaNumbasDenganSaldo = (listAnggota || []).filter((anggota) =>
   Number(saldoBerjalanByAnggota.get(anggota.id) || 0) > 0
 );
+const anggotaTanpaTagihanDenganSaldo = anggotaNumbasDenganSaldo;
 
 const cashMovements: any[] = [];
 for (const setoran of listSetoran || []) {
@@ -984,7 +1030,7 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
         </button>
         <button type="button" data-open-dialog="dialog-pembayaran-numbas" class="flex min-h-14 items-center gap-3 rounded-lg border border-emerald-200 bg-white px-3 py-2 text-left text-xs font-bold text-emerald-900 transition hover:bg-emerald-50 focus-visible:outline-2 focus-visible:outline-emerald-600">
           <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-emerald-100 text-sm" aria-hidden="true">Rp</span>
-          <span>Pembayaran Numbas Ayahan</span>
+          <span>Form Pembayaran Krama</span>
         </button>
         <button type="button" data-open-dialog="dialog-master-event" class="flex min-h-14 items-center gap-3 rounded-lg border border-amber-200 bg-white px-3 py-2 text-left text-xs font-bold text-amber-950 transition hover:bg-amber-50 focus-visible:outline-2 focus-visible:outline-amber-600">
           <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-amber-100 text-sm" aria-hidden="true">&#9733;</span>
@@ -1163,13 +1209,13 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
       </div>
       </dialog>
 
-      <!-- Form Pembayaran Numbas Ayahan -->
+      <!-- Form Pembayaran Krama -->
       <dialog id="dialog-pembayaran-numbas" class="w-full max-w-2xl rounded-xl border border-slate-200 p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
       <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <h2 class="text-base font-bold text-slate-800">Form Pembayaran Numbas Ayahan</h2>
-            <p class="text-xs text-slate-500 mt-0.5">Catat pembayaran tahunan Numbas Ayahan.</p>
+            <h2 class="text-base font-bold text-slate-800">Form Pembayaran Krama</h2>
+            <p class="text-xs text-slate-500 mt-0.5">Catat pembayaran tagihan, cicilan, atau saldo kewajiban Krama.</p>
           </div>
           <button type="button" data-close-dialog="dialog-pembayaran-numbas" aria-label="Tutup form pembayaran" class="rounded-md border border-slate-200 px-2.5 py-1.5 text-slate-500 hover:bg-slate-50">&times;</button>
         </div>
@@ -1213,6 +1259,21 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
             <div id="numbas-bill-picker" class="mt-3 hidden space-y-2">
               <label class="block text-[11px] font-bold text-slate-600 uppercase">Pilih Tagihan yang Dibayar</label>
               <ul id="numbas-bill-options" class="max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg" role="listbox">
+                {anggotaTanpaTagihanDenganSaldo.map((anggota) => (
+                  <li
+                    class="numbas-tagihan-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
+                    data-id={`SALDO:${anggota.id}`}
+                    data-anggota-id={anggota.id}
+                    data-event="Saldo kewajiban berjalan"
+                    data-sisa={Number(saldoBerjalanByAnggota.get(anggota.id) || 0)}
+                    role="option"
+                    aria-selected="false"
+                    tabindex="0"
+                  >
+                    <span class="font-semibold text-slate-900">Saldo kewajiban berjalan</span>
+                    <span class="ml-2 text-slate-500">Sisa: {formatRupiah(Number(saldoBerjalanByAnggota.get(anggota.id) || 0))}</span>
+                  </li>
+                ))}
                 {listTagihanTahunanPasif.filter((tagihan) => Number(tagihan.anggota_id)).map((tagihan) => {
                   const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
                   const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
@@ -1259,7 +1320,7 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
           </div>
 
           <button type="submit" disabled={anggotaNumbasDenganSaldo.length === 0} class="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
-            Simpan Pembayaran Numbas Ayahan
+            Simpan Pembayaran Krama
           </button>
         </form>
       </div>
@@ -2399,7 +2460,9 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
         numbasTagihanSelected.classList.remove('hidden');
       }
       if (numbasTagihanId) numbasTagihanId.value = '';
-      numbasTagihanSearch?.setCustomValidity(billCount > 0 ? '' : 'Tidak ada tagihan untuk Krama ini.');
+      // Saldo virtual selalu tersedia bagi anggota dalam daftar anggotaNumbasDenganSaldo,
+      // sehingga validasi tidak boleh terpenuhi hanya dari daftar tagihan database.
+      numbasTagihanSearch?.setCustomValidity(billCount > 0 ? '' : 'Pilih opsi saldo kewajiban Krama.');
     };
     option.addEventListener('click', selectNumbasAnggota);
     option.addEventListener('keydown', (event) => {
