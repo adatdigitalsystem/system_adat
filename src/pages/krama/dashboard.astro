@@ -188,7 +188,7 @@ const formatRupiah = (val: number) =>
       <h2 class="text-base font-bold text-slate-800 mb-1">Rincian Tagihan & Denda</h2>
       <p class="mb-4 text-xs text-slate-500">Debet menambah kewajiban, kredit adalah pembayaran, saldo adalah sisa kewajiban berjalan.</p>
       <div class="overflow-x-auto">
-        <table class="w-full text-sm text-left text-slate-600">
+        <table id="krama-ledger-table" class="w-full text-sm text-left text-slate-600">
           <thead class="bg-slate-50 text-xs text-slate-500 uppercase border-b border-slate-200">
             <tr>
               <th class="p-3">Tanggal</th>
@@ -202,7 +202,7 @@ const formatRupiah = (val: number) =>
           <tbody class="divide-y divide-slate-100">
             {ledgerRows.length > 0 ? (
               ledgerRows.map((row) => (
-                <tr class="hover:bg-slate-50">
+                <tr class="krama-ledger-row hover:bg-slate-50">
                   <td class="whitespace-nowrap p-3">{row.tanggal || '-'}</td>
                   <td class="hidden whitespace-nowrap p-3 font-mono text-xs font-semibold sm:table-cell">{row.noBukti}</td>
                   <td class="max-w-sm whitespace-pre-wrap p-3 text-slate-800">{row.keterangan}</td>
@@ -219,6 +219,22 @@ const formatRupiah = (val: number) =>
           </tbody>
         </table>
       </div>
+      {ledgerRows.length > 0 && (
+        <div id="krama-ledger-pagination" class="mt-4 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <p id="krama-ledger-summary" class="text-xs text-slate-500"></p>
+          <div class="flex items-center justify-between gap-2 sm:justify-end">
+            <button id="krama-ledger-prev" type="button" aria-label="Halaman sebelumnya" class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">
+              <span aria-hidden="true" class="sm:hidden">←</span>
+              <span class="hidden sm:inline">Sebelumnya</span>
+            </button>
+            <div id="krama-ledger-pages" class="flex items-center gap-1"></div>
+            <button id="krama-ledger-next" type="button" aria-label="Halaman berikutnya" class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">
+              <span aria-hidden="true" class="sm:hidden">→</span>
+              <span class="hidden sm:inline">Berikutnya</span>
+            </button>
+          </div>
+        </div>
+      )}
     </div>
 
     <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
@@ -281,4 +297,68 @@ const formatRupiah = (val: number) =>
     </section>
 
   </div>
+
+  <script>
+    const ledgerTable = document.getElementById('krama-ledger-table') as HTMLTableElement | null;
+    const pagination = document.getElementById('krama-ledger-pagination');
+
+    if (ledgerTable && pagination) {
+      const rows = Array.from(ledgerTable.querySelectorAll<HTMLTableRowElement>('tbody .krama-ledger-row'));
+      const summary = document.getElementById('krama-ledger-summary');
+      const pageLinks = document.getElementById('krama-ledger-pages');
+      const previousButton = document.getElementById('krama-ledger-prev') as HTMLButtonElement | null;
+      const nextButton = document.getElementById('krama-ledger-next') as HTMLButtonElement | null;
+      const pageSize = 10;
+      let currentPage = 1;
+
+      const renderPagination = () => {
+        const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+        currentPage = Math.min(Math.max(currentPage, 1), pageCount);
+        const start = (currentPage - 1) * pageSize;
+        const end = Math.min(start + pageSize, rows.length);
+
+        rows.forEach((row, index) => {
+          row.classList.toggle('hidden', index < start || index >= end);
+        });
+
+        if (summary) {
+          summary.textContent = rows.length > 0
+            ? `Menampilkan ${start + 1}-${end} dari ${rows.length} rincian`
+            : 'Tidak ada rincian';
+        }
+        if (previousButton) previousButton.disabled = currentPage <= 1;
+        if (nextButton) nextButton.disabled = currentPage >= pageCount;
+
+        if (pageLinks) {
+          pageLinks.replaceChildren();
+          const first = Math.max(1, currentPage - 2);
+          const last = Math.min(pageCount, first + 4);
+          for (let page = first; page <= last; page += 1) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = String(page);
+            button.className = page === currentPage
+              ? 'min-w-8 rounded-lg bg-slate-900 px-2 py-2 text-xs font-bold text-white'
+              : 'min-w-8 rounded-lg border border-slate-200 px-2 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50';
+            button.setAttribute('aria-current', page === currentPage ? 'page' : 'false');
+            button.addEventListener('click', () => {
+              currentPage = page;
+              renderPagination();
+            });
+            pageLinks.append(button);
+          }
+        }
+      };
+
+      previousButton?.addEventListener('click', () => {
+        currentPage -= 1;
+        renderPagination();
+      });
+      nextButton?.addEventListener('click', () => {
+        currentPage += 1;
+        renderPagination();
+      });
+      renderPagination();
+    }
+  </script>
 </LayoutDashboard>
