@@ -133,7 +133,7 @@ for (const row of ledgerRows) {
   runningBalance += row.debit - row.kredit;
   row.saldo = runningBalance;
 }
-const totalTunggakan = daftarTunggakan.reduce((total, tagihan) => total + tagihan.sisa, 0);
+const totalTunggakan = Math.max(0, runningBalance);
 const totalDenda = daftarTunggakan
   .filter((tagihan) => /denda/i.test(`${tagihan.jenis} ${tagihan.keterangan || ''}`))
   .reduce((total, tagihan) => total + tagihan.sisa, 0);
@@ -240,7 +240,7 @@ const formatTanggal = (value: string | null | undefined) => {
 
       <div class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
         <div class="overflow-x-auto">
-          <table class="w-full text-left text-sm text-slate-700">
+          <table id="krama-detail-ledger-table" class="w-full text-left text-sm text-slate-700">
             <thead class="bg-slate-50 text-xs uppercase text-slate-500">
               <tr>
                 <th class="p-3">Tanggal</th>
@@ -253,7 +253,7 @@ const formatTanggal = (value: string | null | undefined) => {
             </thead>
             <tbody class="divide-y divide-slate-100">
               {ledgerRows.length ? ledgerRows.map((row) => (
-                <tr>
+                <tr class="krama-detail-ledger-row">
                   <td class="whitespace-nowrap p-3">{row.tanggal || '-'}</td>
                   <td class="hidden whitespace-nowrap p-3 font-mono text-xs font-semibold sm:table-cell">{row.noBukti}</td>
                   <td class="max-w-sm whitespace-pre-wrap p-3">{row.keterangan}</td>
@@ -269,7 +269,97 @@ const formatTanggal = (value: string | null | undefined) => {
             </tbody>
           </table>
         </div>
+        {ledgerRows.length > 0 && (
+          <div id="krama-detail-pagination" class="mt-4 flex flex-col gap-3 border-t border-slate-100 px-4 pb-4 pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p id="krama-detail-summary" class="text-xs text-slate-500"></p>
+            <div class="flex items-center justify-between gap-2 sm:justify-end">
+              <button id="krama-detail-prev" type="button" aria-label="Halaman sebelumnya" class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">
+                <span aria-hidden="true" class="sm:hidden">←</span>
+                <span class="hidden sm:inline">Sebelumnya</span>
+              </button>
+              <div id="krama-detail-pages" class="flex items-center gap-1"></div>
+              <button id="krama-detail-next" type="button" aria-label="Halaman berikutnya" class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40">
+                <span aria-hidden="true" class="sm:hidden">→</span>
+                <span class="hidden sm:inline">Berikutnya</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </section>
   </main>
+
+  <button
+    id="krama-detail-scroll-top"
+    type="button"
+    aria-label="Kembali ke atas"
+    title="Kembali ke atas"
+    class="fixed bottom-5 right-4 z-50 flex h-11 w-11 translate-y-4 items-center justify-center rounded-full bg-slate-900 text-xl font-bold text-white opacity-0 shadow-lg transition-all duration-300 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-400 sm:bottom-6 sm:right-6 sm:h-12 sm:w-12 pointer-events-none"
+  >↑</button>
+
+  <script>
+    const detailTable = document.getElementById('krama-detail-ledger-table');
+    const detailPagination = document.getElementById('krama-detail-pagination');
+
+    if (detailTable && detailPagination) {
+      const detailRows = Array.from(detailTable.querySelectorAll<HTMLTableRowElement>('tbody .krama-detail-ledger-row'));
+      const detailSummary = document.getElementById('krama-detail-summary');
+      const detailPages = document.getElementById('krama-detail-pages');
+      const detailPrevious = document.getElementById('krama-detail-prev') as HTMLButtonElement | null;
+      const detailNext = document.getElementById('krama-detail-next') as HTMLButtonElement | null;
+      const pageSize = 10;
+      let currentPage = 1;
+
+      const renderDetailPagination = () => {
+        const pageCount = Math.max(1, Math.ceil(detailRows.length / pageSize));
+        currentPage = Math.min(Math.max(currentPage, 1), pageCount);
+        const start = (currentPage - 1) * pageSize;
+        const end = Math.min(start + pageSize, detailRows.length);
+        detailRows.forEach((row, index) => row.classList.toggle('hidden', index < start || index >= end));
+
+        if (detailSummary) detailSummary.textContent = `Menampilkan ${start + 1}-${end} dari ${detailRows.length} rincian`;
+        if (detailPrevious) detailPrevious.disabled = currentPage <= 1;
+        if (detailNext) detailNext.disabled = currentPage >= pageCount;
+
+        if (detailPages) {
+          detailPages.replaceChildren();
+          const first = Math.max(1, currentPage - 2);
+          const last = Math.min(pageCount, first + 4);
+          for (let page = first; page <= last; page += 1) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = String(page);
+            button.className = page === currentPage
+              ? 'min-w-8 rounded-lg bg-slate-900 px-2 py-2 text-xs font-bold text-white'
+              : 'min-w-8 rounded-lg border border-slate-200 px-2 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50';
+            button.setAttribute('aria-current', page === currentPage ? 'page' : 'false');
+            button.addEventListener('click', () => {
+              currentPage = page;
+              renderDetailPagination();
+            });
+            detailPages.append(button);
+          }
+        }
+      };
+
+      detailPrevious?.addEventListener('click', () => { currentPage -= 1; renderDetailPagination(); });
+      detailNext?.addEventListener('click', () => { currentPage += 1; renderDetailPagination(); });
+      renderDetailPagination();
+    }
+
+    const detailScrollTop = document.getElementById('krama-detail-scroll-top');
+    if (detailScrollTop) {
+      const updateDetailScrollTop = () => {
+        const shouldShow = window.scrollY > 300;
+        detailScrollTop.classList.toggle('opacity-0', !shouldShow);
+        detailScrollTop.classList.toggle('pointer-events-none', !shouldShow);
+        detailScrollTop.classList.toggle('translate-y-4', !shouldShow);
+        detailScrollTop.classList.toggle('opacity-100', shouldShow);
+        detailScrollTop.classList.toggle('translate-y-0', shouldShow);
+      };
+      window.addEventListener('scroll', updateDetailScrollTop, { passive: true });
+      detailScrollTop.addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+      updateDetailScrollTop();
+    }
+  </script>
 </LayoutDashboard>
