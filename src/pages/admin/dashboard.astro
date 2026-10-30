@@ -436,7 +436,7 @@ for (const payment of listAdminPayments || []) {
 }
 ---
 
-<LayoutDashboard title="Admin Dashboard - Adat Dukuh" role="ADMIN">
+<LayoutDashboard title="Admin Dashboard - Banjar Adat" role="ADMIN">
   <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-6">
     
     <div class="bg-slate-900 text-white p-6 rounded-2xl shadow-lg border border-slate-800 flex flex-col md:flex-row justify-between md:items-center gap-4">
@@ -491,7 +491,12 @@ for (const payment of listAdminPayments || []) {
 
           <div>
             <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Password Login</label>
-            <input type="password" name="password" required placeholder="Minimal 6 karakter" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+            <div class="relative">
+              <input id="add-password" type="password" name="password" required value="" placeholder="Minimal 6 karakter" class="w-full text-xs p-2.5 pr-10 rounded-xl border border-slate-200 bg-slate-50" />
+              <button type="button" data-password-toggle aria-label="Tampilkan password" class="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-slate-500 hover:text-slate-800">
+                <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="h-4 w-4"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12s3.5-6.25 9.75-6.25S21.75 12 21.75 12 18.25 18.25 12 18.25 2.25 12 2.25 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+              </button>
+            </div>
           </div>
 
           <div class="grid grid-cols-2 gap-3">
@@ -955,7 +960,12 @@ for (const payment of listAdminPayments || []) {
 
         <div>
           <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Password Baru / Password Login Pertama</label>
-          <input type="password" name="new_password" placeholder="Kosongkan jika tidak ingin mengubah password" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50" />
+          <div class="relative">
+            <input id="edit-new-password" type="password" name="new_password" value="" placeholder="Kosongkan jika tidak ingin mengubah password" class="w-full text-xs p-2.5 pr-10 rounded-xl border border-slate-200 bg-slate-50" />
+            <button type="button" data-password-toggle aria-label="Tampilkan password" class="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-slate-500 hover:text-slate-800">
+              <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="h-4 w-4"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 12s3.5-6.25 9.75-6.25S21.75 12 21.75 12 18.25 18.25 12 18.25 2.25 12 2.25 12Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </button>
+          </div>
           <span class="text-[10px] text-slate-400">Isi minimal 6 karakter jika ingin mereset password anggota ini.</span>
         </div>
 
@@ -965,7 +975,7 @@ for (const payment of listAdminPayments || []) {
             <select id="edit_role" name="role" class="w-full text-xs p-2.5 rounded-xl border border-slate-200 bg-slate-50">
               <option value="KRAMA">KRAMA</option>
               <option value="KEPALA_REGU">Kepala Regu</option>
-              <option value="SINOMAN">Sinoman</option>
+                <option value="SINOMAN">Sinoman</option>
               <option value="BENDAHARA">Bendahara</option>
               <option value="PENGURUS">Pengurus</option>
               <option value="ADMIN">Admin</option>
@@ -1024,6 +1034,17 @@ for (const payment of listAdminPayments || []) {
   <!-- Script untuk Modal Edit (Menggunakan data-attribute agar aman dari Unterminated String Error) -->
   <script is:inline>
     document.addEventListener('DOMContentLoaded', () => {
+      document.querySelectorAll('[data-password-toggle]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const input = button.parentElement?.querySelector('input');
+          if (!input) return;
+          const showPassword = input.type === 'password';
+          input.type = showPassword ? 'text' : 'password';
+          button.setAttribute('aria-label', showPassword ? 'Sembunyikan password' : 'Tampilkan password');
+          button.setAttribute('aria-pressed', String(showPassword));
+        });
+      });
+
       const memberRowsContainer = document.getElementById('admin-member-rows');
       const sortButtons = Array.from(document.querySelectorAll('[data-admin-sort]'));
       const memberSearch = document.getElementById('admin-member-search');
@@ -1317,6 +1338,11 @@ for (const payment of listAdminPayments || []) {
             document.getElementById('edit_tanggal_lahir').value = krama.tanggal_lahir ? krama.tanggal_lahir.slice(0, 10) : '';
             document.getElementById('edit_alamat').value = krama.alamat || '';
             document.getElementById('edit_status_aktif').value = krama.status_aktif || 'AKTIF';
+            document.getElementById('edit-new-password').value = '';
+            document.getElementById('edit-new-password').type = 'password';
+            const editPasswordToggle = document.getElementById('edit-new-password')?.parentElement?.querySelector('[data-password-toggle]');
+            editPasswordToggle?.setAttribute('aria-label', 'Tampilkan password');
+            editPasswordToggle?.setAttribute('aria-pressed', 'false');
             
             document.getElementById('editModal').classList.remove('hidden');
             document.getElementById('editModal').classList.add('flex');
@@ -1328,6 +1354,14 @@ for (const payment of listAdminPayments || []) {
     });
 
     function closeEditModal() {
+      const editPassword = document.getElementById('edit-new-password');
+      if (editPassword) {
+        editPassword.value = '';
+        editPassword.type = 'password';
+        const editPasswordToggle = editPassword.parentElement?.querySelector('[data-password-toggle]');
+        editPasswordToggle?.setAttribute('aria-label', 'Tampilkan password');
+        editPasswordToggle?.setAttribute('aria-pressed', 'false');
+      }
       document.getElementById('editModal').classList.add('hidden');
       document.getElementById('editModal').classList.remove('flex');
     }
