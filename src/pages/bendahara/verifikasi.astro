@@ -278,24 +278,29 @@ if (Astro.request.method === 'POST') {
       const keteranganBayar = formData.get('keterangan')?.toString().trim() || 'Pembayaran Numbas Ayahan';
 
       if (!tagihanId || !Number.isFinite(nominalBayar) || nominalBayar <= 0) {
-        throw new Error('Pilih tagihan tahunan dan masukkan nominal pembayaran yang valid.');
+        throw new Error('Pilih tagihan dan masukkan nominal pembayaran yang valid.');
       }
 
       const { data: tagihan, error: tagihanError } = await privilegedSupabase
         .from('tagihan_krama')
-        .select('id, anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, status_aktif)')
+        .select('id, anggota_id, jenis_tagihan, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, status_aktif)')
         .eq('id', tagihanId)
         .maybeSingle();
       if (tagihanError) throw tagihanError;
       if (!tagihan) throw new Error('Tagihan tidak ditemukan.');
-      const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
-      const anggotaPasif = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
-      const jenisEventTahunan = String(eventTahunan?.jenis_event || '').trim().toUpperCase();
-      const statusAnggotaPasif = String(anggotaPasif?.status_aktif || '').trim().toUpperCase();
-      if (jenisEventTahunan !== 'TAHUNAN' || !['TIDAK_AKTIF', 'PASIF'].includes(statusAnggotaPasif)) {
-        throw new Error('Pembayaran Numbas Ayahan hanya untuk tagihan tahunan anggota Numbas Ayahan.');
+      let anggotaPasif = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+      let { data: anggotaTagihan } = await privilegedSupabase
+        .from('anggota')
+        .select('nama_lengkap, status_aktif')
+        .eq('id', tagihan.anggota_id)
+        .maybeSingle();
+      if (!anggotaPasif?.status_aktif) anggotaPasif = anggotaTagihan;
+      const statusAnggotaPasif = String(anggotaPasif?.status_aktif || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (!['TIDAKAKTIF', 'PASIF', 'NUMBASAYAHAN'].includes(statusAnggotaPasif)) {
+        throw new Error('Tagihan ini bukan milik anggota Numbas Ayahan.');
       }
-      if (['LUNAS', 'VERIFIED'].includes((tagihan.status_bayar || '').toUpperCase())) {
+      const statusBayar = String(tagihan.status_bayar || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (['LUNAS', 'VERIFIED'].includes(statusBayar)) {
         throw new Error('Tagihan tahunan ini sudah lunas.');
       }
 
@@ -623,17 +628,27 @@ if (listTransaksiKasError) errorMessage = `Gagal memuat buku kas: ${listTransaks
 
 const { data: tagihanTahunan } = await privilegedSupabase
   .from('tagihan_krama')
-  .select('id, anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, no_hp, status_aktif)')
-  .in('status_bayar', ['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
+  .select('id, anggota_id, jenis_tagihan, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, no_hp, status_aktif)');
+const anggotaById = new Map((listAnggota || []).map((anggota) => [anggota.id, anggota]));
+const normalizeStatusText = (value: unknown) => String(value || '')
+  .trim()
+  .toUpperCase()
+  .replace(/[^A-Z0-9]/g, '');
 const listTagihanTahunanPasif = (tagihanTahunan || []).filter((tagihan) => {
   const eventTagihan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
-  const anggotaTagihan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
-  const jenisEvent = String(eventTagihan?.jenis_event || '').trim().toUpperCase();
-  const statusAnggota = String(anggotaTagihan?.status_aktif || '').trim().toUpperCase();
-  return jenisEvent === 'TAHUNAN' && ['TIDAK_AKTIF', 'PASIF'].includes(statusAnggota);
+  let anggotaTagihan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+  if (!anggotaTagihan?.nama_lengkap || !anggotaTagihan?.status_aktif) {
+    anggotaTagihan = { ...anggotaTagihan, ...(anggotaById.get(tagihan.anggota_id) || {}) };
+  }
+  const statusAnggota = normalizeStatusText(anggotaTagihan?.status_aktif);
+  const statusBayar = normalizeStatusText(tagihan.status_bayar);
+  const totalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+  const sisaTagihan = Math.max(0, totalTagihan - Number(tagihan.jumlah_dibayar || 0));
+  const statusPembayaranLunas = ['LUNAS', 'VERIFIED'].includes(statusBayar);
+  const statusNumbas = ['TIDAKAKTIF', 'PASIF', 'NUMBASAYAHAN'].includes(statusAnggota);
+  return statusNumbas && !statusPembayaranLunas && sisaTagihan > 0;
 });
 
-const anggotaById = new Map((listAnggota || []).map((anggota) => [anggota.id, anggota]));
 const totalPembayaranByTagihan = new Map<string, number>();
 for (const payment of listPayments || []) {
   if (!payment.tagihan_krama_id) continue;
@@ -1161,13 +1176,13 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
           <input type="hidden" name="action" value="bayar_numbas_ayahan" />
 
           <div>
-            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Pilih Numbas Ayahan / Tagihan Tahunan</label>
+            <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Pilih Krama / Tagihan Belum Lunas</label>
             <input type="hidden" id="numbas-tagihan-id" name="tagihan_id" />
             <input
               type="search"
               id="numbas-tagihan-search"
               autocomplete="off"
-              placeholder="Cari nama krama atau tagihan..."
+              placeholder="Cari nama krama, iuran tahunan, denda, atau cicilan..."
               aria-controls="numbas-tagihan-options"
               aria-autocomplete="list"
               required
@@ -1178,16 +1193,18 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
               {listTagihanTahunanPasif.map((tagihan) => {
                 const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
                 const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
-                const anggotaTahunan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+                let anggotaTahunan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+                if (!anggotaTahunan?.nama_lengkap) anggotaTahunan = anggotaById.get(tagihan.anggota_id) || anggotaTahunan;
                 const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
                 const namaAnggota = anggotaTahunan?.nama_lengkap || 'Krama';
-                const namaEvent = eventTahunan?.nama_event || 'Numbas Ayahan';
+                const namaEvent = eventTahunan?.nama_event || tagihan.jenis_tagihan || tagihan.keterangan || 'Tagihan Numbas Ayahan';
+                const namaTagihan = String(tagihan.jenis_tagihan || tagihan.keterangan || namaEvent);
                 return (
                   <li
                     class="numbas-tagihan-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
                     data-id={tagihan.id}
                     data-name={namaAnggota}
-                    data-event={namaEvent}
+                    data-event={namaTagihan}
                     data-sisa={sisaTagihan}
                     role="option"
                     aria-selected="false"
