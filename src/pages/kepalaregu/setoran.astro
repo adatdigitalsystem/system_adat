@@ -6,6 +6,34 @@ import { formatRupiah } from '../../lib/utils';
 let message = Astro.url.searchParams.get('sukses')?.slice(0, 300) || '';
 let isSuccess = Boolean(message);
 
+const accessToken = Astro.cookies.get('sb-access-token')?.value;
+let kepalaProfile: { id: string; regu_id: string | null; no_regu: string | null; role: string | null } | null = null;
+
+if (accessToken) {
+  const { data: { user } } = await supabase.auth.getUser(accessToken);
+  if (user) {
+    const { data } = await supabase
+      .from('anggota')
+      .select('id, regu_id, no_regu, role')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    kepalaProfile = data;
+  }
+}
+
+const kepalaRole = (kepalaProfile?.role || '').toUpperCase().replace(/[\s_-]/g, '');
+const isKepalaRegu = ['KEPALAREGU', 'KEPALAREGM', 'KEPALAREGUTEMPEKAN'].includes(kepalaRole);
+if (!kepalaProfile || !isKepalaRegu) {
+  return Astro.redirect('/403', 302);
+}
+
+const { data: anggotaRegu } = kepalaProfile.regu_id
+  ? await supabase.from('anggota').select('id, no_regu').eq('regu_id', kepalaProfile.regu_id)
+  : kepalaProfile.no_regu
+    ? await supabase.from('anggota').select('id').eq('no_regu', kepalaProfile.no_regu)
+    : { data: [] };
+const anggotaReguIds = new Set((anggotaRegu || []).map((anggota) => anggota.id));
+
 // Tangani aksi Form Submit (POST)
 if (Astro.request.method === 'POST') {
   try {
@@ -15,13 +43,29 @@ if (Astro.request.method === 'POST') {
     if (actionType === 'BAYAR_TAGIHAN') {
       const tagihanId = formData.get('tagihan_id')?.toString();
       const nominalBayar = Number(formData.get('nominal_bayar'));
-      const anggotaId = formData.get('anggota_id')?.toString();
 
-      if (tagihanId && nominalBayar > 0) {
+      if (tagihanId && Number.isFinite(nominalBayar) && nominalBayar > 0) {
+        const { data: tagihanAkses, error: tagihanAksesError } = await supabase
+          .from('tagihan_krama')
+          .select('id, anggota_id, total_nominal, jumlah_dibayar, status_bayar')
+          .eq('id', tagihanId)
+          .maybeSingle();
+        if (tagihanAksesError) throw tagihanAksesError;
+        if (!tagihanAkses || !anggotaReguIds.has(tagihanAkses.anggota_id)) {
+          throw new Error('Anda hanya dapat memproses tagihan anggota pada regu sendiri.');
+        }
+        if (['LUNAS', 'COLLECTED_BY_REGU'].includes((tagihanAkses.status_bayar || '').toUpperCase())) {
+          throw new Error('Tagihan ini sudah lunas atau menunggu penyetoran ke Bendahara.');
+        }
+        const sisaTagihan = Math.max(0, Number(tagihanAkses.total_nominal || 0) - Number(tagihanAkses.jumlah_dibayar || 0));
+        if (nominalBayar > sisaTagihan) {
+          throw new Error('Nominal pembayaran melebihi sisa kewajiban.');
+        }
+
         // 1. Simpan ke riwayat pembayaran
         await supabase.from('riwayat_pembayaran_cicilan').insert({
           tagihan_krama_id: tagihanId,
-          anggota_id: anggotaId,
+          anggota_id: tagihanAkses.anggota_id,
           nominal_bayar: nominalBayar,
           metode_pembayaran: 'CASH_REGU',
           keterangan: 'Pembayaran tunai via Kepala Regu'
@@ -49,14 +93,15 @@ if (Astro.request.method === 'POST') {
         isSuccess = true;
       }
     } else if (actionType === 'AJUKAN_SETORAN') {
-      const reguId = formData.get('regu_id')?.toString();
-      const kepalaReguId = formData.get('kepala_regu_id')?.toString();
       const totalSetoran = Number(formData.get('total_setoran'));
 
-      if (reguId && totalSetoran > 0) {
+      if (!kepalaProfile.regu_id && !kepalaProfile.no_regu) {
+        throw new Error('Profil Kepala Regu belum terhubung ke regu.');
+      }
+      if (totalSetoran > 0) {
         await supabase.from('setoran_regu').insert({
-          regu_id: reguId,
-          kepala_regu_id: kepalaReguId,
+          regu_id: kepalaProfile.regu_id,
+          kepala_regu_id: kepalaProfile.id,
           total_nominal: totalSetoran,
           status_verifikasi: 'PENDING',
           keterangan: 'Pengajuan setoran tunai berkala regu'
@@ -80,19 +125,21 @@ if (Astro.request.method === 'POST') {
 }
 
 // Ambil daftar tagihan yang belum lunas (UNPAID / PARTIAL)
-const { data: listTagihan } = await supabase
+const { data: listTagihanRegu } = await supabase
   .from('tagihan_krama')
   .select(`
     id, total_nominal, jumlah_dibayar, status_bayar, keterangan, anggota_id,
     anggota ( id, nama_lengkap, regu_id, regu(nama_regu) )
   `)
   .in('status_bayar', ['UNPAID', 'PARTIAL']);
+const listTagihan = (listTagihanRegu || []).filter((tagihan) => anggotaReguIds.has(tagihan.anggota_id));
 
 // Ambil total dana terkeruk yang siap disetorkan ke Bendahara
-const { data: listKoleksi } = await supabase
+const { data: listKoleksiRegu } = await supabase
   .from('tagihan_krama')
-  .select('jumlah_dibayar')
+  .select('anggota_id, jumlah_dibayar')
   .eq('status_bayar', 'COLLECTED_BY_REGU');
+const listKoleksi = (listKoleksiRegu || []).filter((tagihan) => anggotaReguIds.has(tagihan.anggota_id));
 
 const totalKoleksiSiapSetor = (listKoleksi || []).reduce((acc, curr) => acc + Number(curr.jumlah_dibayar || 0), 0);
 ---
@@ -173,9 +220,6 @@ const totalKoleksiSiapSetor = (listKoleksi || []).reduce((acc, curr) => acc + Nu
         <form method="POST" class="space-y-3">
           <input type="hidden" name="action_type" value="AJUKAN_SETORAN" />
           <input type="hidden" name="total_setoran" value={totalKoleksiSiapSetor} />
-          <!-- ID dummy regu/kepala regu untuk pengujian -->
-          <input type="hidden" name="regu_id" value="33333333-3333-3333-3333-333333333333" />
-          <input type="hidden" name="kepala_regu_id" value="bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" />
 
           <button 
             type="submit" 
