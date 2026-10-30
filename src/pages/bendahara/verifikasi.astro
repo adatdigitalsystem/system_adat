@@ -290,7 +290,9 @@ if (Astro.request.method === 'POST') {
       if (!tagihan) throw new Error('Tagihan tidak ditemukan.');
       const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
       const anggotaPasif = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
-      if (eventTahunan?.jenis_event !== 'TAHUNAN' || anggotaPasif?.status_aktif !== 'TIDAK_AKTIF') {
+      const jenisEventTahunan = String(eventTahunan?.jenis_event || '').trim().toUpperCase();
+      const statusAnggotaPasif = String(anggotaPasif?.status_aktif || '').trim().toUpperCase();
+      if (jenisEventTahunan !== 'TAHUNAN' || !['TIDAK_AKTIF', 'PASIF'].includes(statusAnggotaPasif)) {
         throw new Error('Pembayaran Numbas Ayahan hanya untuk tagihan tahunan anggota Numbas Ayahan.');
       }
       if (['LUNAS', 'VERIFIED'].includes((tagihan.status_bayar || '').toUpperCase())) {
@@ -623,10 +625,13 @@ const { data: tagihanTahunan } = await privilegedSupabase
   .from('tagihan_krama')
   .select('id, anggota_id, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, no_hp, status_aktif)')
   .in('status_bayar', ['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
-const listTagihanTahunanPasif = (tagihanTahunan || []).filter((tagihan) =>
-  (Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event)?.jenis_event === 'TAHUNAN'
-  && (Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota)?.status_aktif === 'TIDAK_AKTIF'
-);
+const listTagihanTahunanPasif = (tagihanTahunan || []).filter((tagihan) => {
+  const eventTagihan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
+  const anggotaTagihan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
+  const jenisEvent = String(eventTagihan?.jenis_event || '').trim().toUpperCase();
+  const statusAnggota = String(anggotaTagihan?.status_aktif || '').trim().toUpperCase();
+  return jenisEvent === 'TAHUNAN' && ['TIDAK_AKTIF', 'PASIF'].includes(statusAnggota);
+});
 
 const anggotaById = new Map((listAnggota || []).map((anggota) => [anggota.id, anggota]));
 const totalPembayaranByTagihan = new Map<string, number>();
@@ -1157,20 +1162,44 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
 
           <div>
             <label class="block text-[11px] font-bold text-slate-600 uppercase mb-1">Pilih Numbas Ayahan / Tagihan Tahunan</label>
-            <select id="numbas-tagihan" name="tagihan_id" required class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs">
-              <option value="">-- Pilih Krama dan Tagihan --</option>
+            <input type="hidden" id="numbas-tagihan-id" name="tagihan_id" />
+            <input
+              type="search"
+              id="numbas-tagihan-search"
+              autocomplete="off"
+              placeholder="Cari nama krama atau tagihan..."
+              aria-controls="numbas-tagihan-options"
+              aria-autocomplete="list"
+              required
+              class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs"
+            />
+            <div id="numbas-tagihan-selected" class="mt-2 hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900" aria-live="polite"></div>
+            <ul id="numbas-tagihan-options" class="mt-1 hidden max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg" role="listbox">
               {listTagihanTahunanPasif.map((tagihan) => {
                 const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
                 const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
                 const anggotaTahunan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
                 const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
+                const namaAnggota = anggotaTahunan?.nama_lengkap || 'Krama';
+                const namaEvent = eventTahunan?.nama_event || 'Numbas Ayahan';
                 return (
-                  <option value={tagihan.id} data-sisa={sisaTagihan}>
-                    {anggotaTahunan?.nama_lengkap || 'Krama'} — {eventTahunan?.nama_event || 'Numbas Ayahan'} (Sisa: {formatRupiah(sisaTagihan)})
-                  </option>
+                  <li
+                    class="numbas-tagihan-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
+                    data-id={tagihan.id}
+                    data-name={namaAnggota}
+                    data-event={namaEvent}
+                    data-sisa={sisaTagihan}
+                    role="option"
+                    aria-selected="false"
+                    tabindex="0"
+                  >
+                    <span class="font-semibold text-slate-900">{namaAnggota}</span>
+                    <span class="ml-2 text-slate-500">{namaEvent} · Sisa: {formatRupiah(sisaTagihan)}</span>
+                  </li>
                 );
               })}
-            </select>
+              <li id="numbas-tagihan-empty" class="hidden px-3 py-2 text-xs text-slate-500" role="status">Nama krama atau tagihan tidak ditemukan.</li>
+            </ul>
             {listTagihanTahunanPasif.length === 0 && (
               <p class="mt-1 text-[10px] text-slate-500">Tidak ada tagihan tahunan Numbas Ayahan yang belum lunas.</p>
             )}
@@ -1647,6 +1676,7 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
               <th class="p-3 text-right">Kredit Kas</th>
               <th class="p-3 text-right">Saldo</th>
               <th class="p-3">Metode / Bukti</th>
+              <th class="no-print p-3 text-center">Aksi</th>
             </tr>
           </thead>
           <tbody id="bendahara-cash-rows" class="divide-y divide-slate-100">
@@ -1671,11 +1701,7 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
               >
                 <td class="whitespace-nowrap p-3">{movement.tanggal || '-'}</td>
                 <td class="whitespace-nowrap p-3 font-mono text-[10px] font-semibold">
-                  {movement.editType ? (
-                    <button type="button" data-open-transaction-edit data-open-cash-edit title="Klik untuk mengedit transaksi" class="font-mono font-semibold text-blue-700 underline decoration-dotted underline-offset-2 hover:text-blue-900">{movement.referensi}</button>
-                  ) : (
-                    <span title="Dibuat otomatis dari setoran. Untuk koreksi, tolak atau balikkan setoran.">{movement.referensi}</span>
-                  )}
+                  <span title={movement.editType ? 'Nomor bukti transaksi' : 'Dibuat otomatis dari setoran. Untuk koreksi, tolak atau balikkan setoran.'}>{movement.referensi}</span>
                 </td>
                 <td class="p-3">
                   <p class={`font-semibold ${movement.jenis === 'KELUAR' || movement.jenis === 'PEMBALIKAN' ? 'text-red-800' : 'text-emerald-800'}`}>{labelKategoriKas(movement.kategori)}</p>
@@ -1689,13 +1715,22 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
                   <span>{movement.metode || (movement.kategori === 'Setoran Regu' ? 'Setoran terverifikasi' : movement.kategori === 'Pembayaran Langsung Krama' ? 'Tunai' : movement.jenis === 'SALDO_AWAL' ? 'Saldo pembuka' : '-')}</span>
                   {movement.buktiUrl && <a href={movement.buktiUrl} target="_blank" rel="noreferrer" class="ml-2 font-semibold text-blue-700 hover:underline">Bukti</a>}
                 </td>
+                <td class="no-print whitespace-nowrap p-3 text-center">
+                  {movement.editType ? (
+                    <button type="button" data-open-cash-edit class="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-[11px] font-bold text-blue-800 hover:bg-blue-100">
+                      Edit
+                    </button>
+                  ) : (
+                    <span class="text-slate-400" title="Transaksi otomatis tidak dapat diedit dari buku kas.">-</span>
+                  )}
+                </td>
               </tr>
             )) : (
-              <tr><td colspan="8" class="p-8 text-center text-slate-400">Belum ada transaksi kas masuk atau keluar.</td></tr>
+              <tr><td colspan="9" class="p-8 text-center text-slate-400">Belum ada transaksi kas masuk atau keluar.</td></tr>
             )}
           </tbody>
           <tfoot class="border-t-2 border-slate-300 bg-slate-50 font-bold text-slate-900">
-            <tr><th colspan="4" class="p-3 text-right">Subtotal hasil pencarian</th><td data-cash-subtotal-debit class="whitespace-nowrap p-3 text-right text-emerald-800">Rp0</td><td data-cash-subtotal-credit class="whitespace-nowrap p-3 text-right text-red-800">Rp0</td><td data-cash-subtotal-net class="whitespace-nowrap p-3 text-right">Rp0</td><td></td></tr>
+            <tr><th colspan="5" class="p-3 text-right">Subtotal hasil pencarian</th><td data-cash-subtotal-debit class="whitespace-nowrap p-3 text-right text-emerald-800">Rp0</td><td data-cash-subtotal-credit class="whitespace-nowrap p-3 text-right text-red-800">Rp0</td><td data-cash-subtotal-net class="whitespace-nowrap p-3 text-right">Rp0</td><td></td><td class="no-print"></td></tr>
           </tfoot>
         </table>
       </div>
@@ -2267,21 +2302,84 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
     renderPagination();
   });
 
-  const numbasTagihanSelect = document.querySelector<HTMLSelectElement>('#numbas-tagihan');
+  const numbasTagihanSearch = document.querySelector<HTMLInputElement>('#numbas-tagihan-search');
+  const numbasTagihanId = document.querySelector<HTMLInputElement>('#numbas-tagihan-id');
+  const numbasTagihanOptions = document.querySelector<HTMLUListElement>('#numbas-tagihan-options');
+  const numbasTagihanSelected = document.querySelector<HTMLElement>('#numbas-tagihan-selected');
+  const numbasTagihanEmpty = document.querySelector<HTMLElement>('#numbas-tagihan-empty');
+  const numbasTagihanRows = Array.from(document.querySelectorAll<HTMLElement>('.numbas-tagihan-option'));
   const numbasNominalInput = document.querySelector<HTMLInputElement>('#numbas-nominal');
   const numbasSisaText = document.querySelector<HTMLElement>('#numbas-sisa');
+  const numbasForm = document.querySelector<HTMLFormElement>('#numbas-ayahan-form');
 
-  numbasTagihanSelect?.addEventListener('change', () => {
-    const selectedOption = numbasTagihanSelect.selectedOptions[0];
-    const remaining = Number(selectedOption?.dataset.sisa || 0);
-    if (numbasNominalInput) {
-      numbasNominalInput.max = String(remaining);
-      numbasNominalInput.value = remaining > 0 ? String(remaining) : '';
-    }
-    if (numbasSisaText) {
-      numbasSisaText.textContent = remaining > 0
-        ? `Sisa kewajiban: ${new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(remaining)}`
-        : 'Pilih tagihan tahunan yang masih memiliki sisa.';
+  const formatRupiahClient = (value: number) => new Intl.NumberFormat('id-ID', {
+    style: 'currency', currency: 'IDR', maximumFractionDigits: 0,
+  }).format(value);
+
+  const hideNumbasTagihanSuggestions = () => numbasTagihanOptions?.classList.add('hidden');
+
+  numbasTagihanSearch?.addEventListener('focus', () => {
+    numbasTagihanRows.forEach((option) => option.classList.remove('hidden'));
+    numbasTagihanOptions?.classList.remove('hidden');
+    numbasTagihanEmpty?.classList.add('hidden');
+  });
+
+  numbasTagihanSearch?.addEventListener('input', () => {
+    const query = numbasTagihanSearch.value.toLocaleLowerCase('id-ID').trim();
+    numbasTagihanId && (numbasTagihanId.value = '');
+    numbasTagihanSearch.setCustomValidity('Cari lalu pilih tagihan dari daftar hasil.');
+    numbasTagihanSelected?.classList.add('hidden');
+    let matchCount = 0;
+    numbasTagihanRows.forEach((option) => {
+      const searchable = `${option.dataset.name || ''} ${option.dataset.event || ''}`.toLocaleLowerCase('id-ID');
+      const matches = query.length === 0 || searchable.includes(query);
+      option.classList.toggle('hidden', !matches);
+      if (matches) matchCount += 1;
+    });
+    numbasTagihanOptions?.classList.remove('hidden');
+    numbasTagihanEmpty?.classList.toggle('hidden', matchCount > 0 || query.length === 0);
+  });
+
+  numbasTagihanRows.forEach((option) => {
+    const selectNumbasTagihan = () => {
+      const id = option.dataset.id || '';
+      const name = option.dataset.name || 'Krama';
+      const event = option.dataset.event || 'Numbas Ayahan';
+      const remaining = Number(option.dataset.sisa || 0);
+      if (numbasTagihanId) numbasTagihanId.value = id;
+      if (numbasTagihanSearch) {
+        numbasTagihanSearch.value = `${name} — ${event}`;
+        numbasTagihanSearch.setCustomValidity('');
+      }
+      numbasTagihanRows.forEach((row) => row.setAttribute('aria-selected', String(row === option)));
+      if (numbasTagihanSelected) {
+        numbasTagihanSelected.textContent = `${name} · ${event} · Sisa ${formatRupiahClient(remaining)}`;
+        numbasTagihanSelected.classList.remove('hidden');
+      }
+      if (numbasNominalInput) {
+        numbasNominalInput.max = String(remaining);
+        numbasNominalInput.value = remaining > 0 ? String(remaining) : '';
+      }
+      if (numbasSisaText) numbasSisaText.textContent = `Sisa kewajiban: ${formatRupiahClient(remaining)}`;
+      hideNumbasTagihanSuggestions();
+    };
+    option.addEventListener('click', selectNumbasTagihan);
+    option.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectNumbasTagihan();
+      }
+    });
+  });
+
+  numbasForm?.addEventListener('submit', (event) => {
+    if (!numbasTagihanId?.value) {
+      event.preventDefault();
+      numbasTagihanSearch?.focus();
+      numbasTagihanSearch?.setCustomValidity('Cari lalu pilih tagihan dari daftar hasil.');
+      numbasTagihanSearch?.reportValidity();
+    } else {
+      numbasTagihanSearch?.setCustomValidity('');
     }
   });
 
