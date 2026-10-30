@@ -295,9 +295,8 @@ if (Astro.request.method === 'POST') {
         .eq('id', tagihan.anggota_id)
         .maybeSingle();
       if (!anggotaPasif?.status_aktif) anggotaPasif = anggotaTagihan;
-      const statusAnggotaPasif = String(anggotaPasif?.status_aktif || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-      if (!['TIDAKAKTIF', 'PASIF', 'NUMBASAYAHAN'].includes(statusAnggotaPasif)) {
-        throw new Error('Tagihan ini bukan milik anggota Numbas Ayahan.');
+      if (!anggotaPasif?.nama_lengkap && !anggotaTagihan) {
+        throw new Error('Anggota pemilik tagihan tidak ditemukan.');
       }
       const statusBayar = String(tagihan.status_bayar || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (['LUNAS', 'VERIFIED'].includes(statusBayar)) {
@@ -645,7 +644,7 @@ const listTagihanTahunanPasif = (tagihanTahunan || []).filter((tagihan) => {
   const totalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
   const sisaTagihan = Math.max(0, totalTagihan - Number(tagihan.jumlah_dibayar || 0));
   const statusPembayaranLunas = ['LUNAS', 'VERIFIED'].includes(statusBayar);
-  const statusNumbas = ['TIDAKAKTIF', 'PASIF', 'NUMBASAYAHAN'].includes(statusAnggota);
+  const statusNumbas = ['TIDAKAKTIF', 'PASIF', 'NUMBASAYAHAN', 'AKTIF'].includes(statusAnggota);
   return statusNumbas && !statusPembayaranLunas && sisaTagihan > 0;
 });
 
@@ -759,6 +758,9 @@ const selisihSaldoLegacy = riwayatDenganNama
 const totalDebetLedger = riwayatDenganNama.reduce((total, entry) => total + entry.debit, 0);
 const totalKreditLedger = riwayatDenganNama.reduce((total, entry) => total + entry.kredit, 0);
 const totalSaldoLedger = [...saldoBerjalanByAnggota.values()].reduce((total, saldo) => total + saldo, 0);
+const anggotaNumbasDenganSaldo = (listAnggota || []).filter((anggota) =>
+  Number(saldoBerjalanByAnggota.get(anggota.id) || 0) > 0
+);
 
 const cashMovements: any[] = [];
 for (const setoran of listSetoran || []) {
@@ -1190,35 +1192,52 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
             />
             <div id="numbas-tagihan-selected" class="mt-2 hidden rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900" aria-live="polite"></div>
             <ul id="numbas-tagihan-options" class="mt-1 hidden max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg" role="listbox">
-              {listTagihanTahunanPasif.map((tagihan) => {
-                const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
-                const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
-                let anggotaTahunan = Array.isArray(tagihan.anggota) ? tagihan.anggota[0] : tagihan.anggota;
-                if (!anggotaTahunan?.nama_lengkap) anggotaTahunan = anggotaById.get(tagihan.anggota_id) || anggotaTahunan;
-                const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
-                const namaAnggota = anggotaTahunan?.nama_lengkap || 'Krama';
-                const namaEvent = eventTahunan?.nama_event || tagihan.jenis_tagihan || tagihan.keterangan || 'Tagihan Numbas Ayahan';
-                const namaTagihan = String(tagihan.jenis_tagihan || tagihan.keterangan || namaEvent);
+              {anggotaNumbasDenganSaldo.map((anggota) => {
+                const saldoAnggota = Number(saldoBerjalanByAnggota.get(anggota.id) || 0);
                 return (
                   <li
-                    class="numbas-tagihan-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
-                    data-id={tagihan.id}
-                    data-name={namaAnggota}
-                    data-event={namaTagihan}
-                    data-sisa={sisaTagihan}
+                    class="numbas-anggota-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
+                    data-id={anggota.id}
+                    data-name={anggota.nama_lengkap || 'Krama'}
                     role="option"
                     aria-selected="false"
                     tabindex="0"
                   >
-                    <span class="font-semibold text-slate-900">{namaAnggota}</span>
-                    <span class="ml-2 text-slate-500">{namaEvent} · Sisa: {formatRupiah(sisaTagihan)}</span>
+                    <span class="font-semibold text-slate-900">{anggota.nama_lengkap || 'Krama'}</span>
+                    <span class="ml-2 text-slate-500">Saldo kewajiban: {formatRupiah(saldoAnggota)}</span>
                   </li>
                 );
               })}
-              <li id="numbas-tagihan-empty" class="hidden px-3 py-2 text-xs text-slate-500" role="status">Nama krama atau tagihan tidak ditemukan.</li>
+              <li id="numbas-tagihan-empty" class="hidden px-3 py-2 text-xs text-slate-500" role="status">Nama krama tidak ditemukan atau tidak memiliki saldo kewajiban.</li>
             </ul>
-            {listTagihanTahunanPasif.length === 0 && (
-              <p class="mt-1 text-[10px] text-slate-500">Tidak ada tagihan tahunan Numbas Ayahan yang belum lunas.</p>
+            <div id="numbas-bill-picker" class="mt-3 hidden space-y-2">
+              <label class="block text-[11px] font-bold text-slate-600 uppercase">Pilih Tagihan yang Dibayar</label>
+              <ul id="numbas-bill-options" class="max-h-56 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg" role="listbox">
+                {listTagihanTahunanPasif.filter((tagihan) => Number(tagihan.anggota_id)).map((tagihan) => {
+                  const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
+                  const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
+                  const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
+                  const namaTagihan = String(tagihan.jenis_tagihan || tagihan.keterangan || eventTahunan?.nama_event || 'Tagihan');
+                  return (
+                    <li
+                      class="numbas-tagihan-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
+                      data-id={tagihan.id}
+                      data-anggota-id={tagihan.anggota_id}
+                      data-event={namaTagihan}
+                      data-sisa={sisaTagihan}
+                      role="option"
+                      aria-selected="false"
+                      tabindex="0"
+                    >
+                      <span class="font-semibold text-slate-900">{namaTagihan}</span>
+                      <span class="ml-2 text-slate-500">Sisa: {formatRupiah(sisaTagihan)}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+            {anggotaNumbasDenganSaldo.length === 0 && (
+              <p class="mt-1 text-[10px] text-slate-500">Tidak ada Krama Numbas Ayahan yang memiliki saldo kewajiban.</p>
             )}
           </div>
 
@@ -2324,7 +2343,9 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
   const numbasTagihanOptions = document.querySelector<HTMLUListElement>('#numbas-tagihan-options');
   const numbasTagihanSelected = document.querySelector<HTMLElement>('#numbas-tagihan-selected');
   const numbasTagihanEmpty = document.querySelector<HTMLElement>('#numbas-tagihan-empty');
+  const numbasAnggotaRows = Array.from(document.querySelectorAll<HTMLElement>('.numbas-anggota-option'));
   const numbasTagihanRows = Array.from(document.querySelectorAll<HTMLElement>('.numbas-tagihan-option'));
+  const numbasBillPicker = document.querySelector<HTMLElement>('#numbas-bill-picker');
   const numbasNominalInput = document.querySelector<HTMLInputElement>('#numbas-nominal');
   const numbasSisaText = document.querySelector<HTMLElement>('#numbas-sisa');
   const numbasForm = document.querySelector<HTMLFormElement>('#numbas-ayahan-form');
@@ -2336,20 +2357,20 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
   const hideNumbasTagihanSuggestions = () => numbasTagihanOptions?.classList.add('hidden');
 
   numbasTagihanSearch?.addEventListener('focus', () => {
-    numbasTagihanRows.forEach((option) => option.classList.remove('hidden'));
+    numbasAnggotaRows.forEach((option) => option.classList.remove('hidden'));
     numbasTagihanOptions?.classList.remove('hidden');
     numbasTagihanEmpty?.classList.add('hidden');
   });
 
   numbasTagihanSearch?.addEventListener('input', () => {
     const query = numbasTagihanSearch.value.toLocaleLowerCase('id-ID').trim();
-    numbasTagihanId && (numbasTagihanId.value = '');
-    numbasTagihanSearch.setCustomValidity('Cari lalu pilih tagihan dari daftar hasil.');
+    if (numbasTagihanId) numbasTagihanId.value = '';
+    numbasTagihanSearch.setCustomValidity('Cari lalu pilih Krama dan tagihan.');
     numbasTagihanSelected?.classList.add('hidden');
+    numbasBillPicker?.classList.add('hidden');
     let matchCount = 0;
-    numbasTagihanRows.forEach((option) => {
-      const searchable = `${option.dataset.name || ''} ${option.dataset.event || ''}`.toLocaleLowerCase('id-ID');
-      const matches = query.length === 0 || searchable.includes(query);
+    numbasAnggotaRows.forEach((option) => {
+      const matches = query.length === 0 || (option.dataset.name || '').toLocaleLowerCase('id-ID').includes(query);
       option.classList.toggle('hidden', !matches);
       if (matches) matchCount += 1;
     });
@@ -2357,28 +2378,52 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
     numbasTagihanEmpty?.classList.toggle('hidden', matchCount > 0 || query.length === 0);
   });
 
+  numbasAnggotaRows.forEach((option) => {
+    const selectNumbasAnggota = () => {
+      const memberId = option.dataset.id || '';
+      const name = option.dataset.name || 'Krama';
+      if (numbasTagihanSearch) numbasTagihanSearch.value = name;
+      numbasAnggotaRows.forEach((row) => row.setAttribute('aria-selected', String(row === option)));
+      hideNumbasTagihanSuggestions();
+      numbasBillPicker?.classList.remove('hidden');
+      let billCount = 0;
+      numbasTagihanRows.forEach((bill) => {
+        const visible = bill.dataset.anggotaId === memberId;
+        bill.classList.toggle('hidden', !visible);
+        if (visible) billCount += 1;
+      });
+      if (numbasTagihanSelected) {
+        numbasTagihanSelected.textContent = billCount > 0
+          ? `${name} · ${billCount} tagihan belum lunas`
+          : `${name} · Tidak ada tagihan yang dapat dipilih`;
+        numbasTagihanSelected.classList.remove('hidden');
+      }
+      if (numbasTagihanId) numbasTagihanId.value = '';
+      numbasTagihanSearch?.setCustomValidity(billCount > 0 ? '' : 'Tidak ada tagihan untuk Krama ini.');
+    };
+    option.addEventListener('click', selectNumbasAnggota);
+    option.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        selectNumbasAnggota();
+      }
+    });
+  });
+
   numbasTagihanRows.forEach((option) => {
     const selectNumbasTagihan = () => {
       const id = option.dataset.id || '';
-      const name = option.dataset.name || 'Krama';
-      const event = option.dataset.event || 'Numbas Ayahan';
+      const event = option.dataset.event || 'Tagihan';
       const remaining = Number(option.dataset.sisa || 0);
       if (numbasTagihanId) numbasTagihanId.value = id;
-      if (numbasTagihanSearch) {
-        numbasTagihanSearch.value = `${name} — ${event}`;
-        numbasTagihanSearch.setCustomValidity('');
-      }
+      if (numbasTagihanSearch) numbasTagihanSearch.setCustomValidity('');
       numbasTagihanRows.forEach((row) => row.setAttribute('aria-selected', String(row === option)));
-      if (numbasTagihanSelected) {
-        numbasTagihanSelected.textContent = `${name} · ${event} · Sisa ${formatRupiahClient(remaining)}`;
-        numbasTagihanSelected.classList.remove('hidden');
-      }
+      if (numbasTagihanSelected) numbasTagihanSelected.textContent = `${numbasTagihanSearch?.value || 'Krama'} · ${event} · Sisa ${formatRupiahClient(remaining)}`;
       if (numbasNominalInput) {
         numbasNominalInput.max = String(remaining);
         numbasNominalInput.value = remaining > 0 ? String(remaining) : '';
       }
       if (numbasSisaText) numbasSisaText.textContent = `Sisa kewajiban: ${formatRupiahClient(remaining)}`;
-      hideNumbasTagihanSuggestions();
     };
     option.addEventListener('click', selectNumbasTagihan);
     option.addEventListener('keydown', (event) => {
