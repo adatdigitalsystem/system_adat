@@ -45,14 +45,6 @@ if (accessToken) {
         .order('created_at', { ascending: false });
 
       listTagihan = tagihanData || [];
-      const statusBelumLunas = new Set(['BELUM_LUNAS', 'BELUM_BAYAR', 'UNPAID', 'PARTIAL']);
-      totalTunggakan = listTagihan
-        .filter((tagihan) => statusBelumLunas.has((tagihan.status_bayar || '').toUpperCase()))
-        .reduce((sum, item) => {
-          const totalNominal = Number(item.total_nominal ?? item.nominal ?? 0);
-          return sum + Math.max(0, totalNominal - Number(item.jumlah_dibayar || 0));
-        }, 0);
-
       // Dibatasi ke anggota yang sedang login; klien server dipakai agar riwayat pembayaran sendiri selalu terbaca.
       const { data: paymentData } = await createSupabaseAdminClient()
         .from('riwayat_pembayaran_cicilan')
@@ -120,6 +112,7 @@ if (accessToken) {
         entry.saldo = runningBalance;
       }
       ledgerRows = entries;
+      totalTunggakan = Math.max(0, runningBalance);
     }
   }
 }
