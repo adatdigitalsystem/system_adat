@@ -60,13 +60,13 @@ export const POST: APIRoute = async ({ request, cookies, redirect }) => {
 
       if (anggotaError) throw anggotaError;
       if (!anggota?.length) {
-        return redirect(`/login?error=${encodeURIComponent('Nomor HP tidak terdaftar dalam sistem.')}`, 303);
+        return redirect(`/login?error=${encodeURIComponent('Nomor HP tidak terdaftar.')}`, 303);
       }
       if (anggota.length > 1) {
         return redirect(`/login?error=${encodeURIComponent('Nomor HP tercatat lebih dari satu kali. Hubungi admin banjar.')}`, 303);
       }
       if (!anggota[0].user_id) {
-        return redirect(`/login?error=${encodeURIComponent('Profil anggota ini belum memiliki akun login. Minta Admin membuat akun melalui form Edit Anggota.')}`, 303);
+        return redirect(`/login?error=${encodeURIComponent('Profil anggota ini belum memiliki akun login.')}`, 303);
       }
       const storedPhoneDigits = anggota[0].no_hp?.replace(/\D/g, '') || digits;
       email = anggota[0].email?.trim().toLowerCase() || '';
@@ -89,7 +89,7 @@ export const POST: APIRoute = async ({ request, cookies, redirect }) => {
     });
 
     if (error || !data.session || !data.user) {
-      return redirect(`/login?error=${encodeURIComponent('Email/nomor HP atau password salah, atau akun Auth belum dibuat. Jika profil berasal dari impor nama saja, minta Admin membuat akun login terlebih dahulu.')}`, 303);
+      return redirect(`/login?error=${encodeURIComponent('Email/No HP atau password salah')}`, 303);
     }
 
     const { data: anggota, error: profileError } = await supabase
@@ -99,7 +99,7 @@ export const POST: APIRoute = async ({ request, cookies, redirect }) => {
       .maybeSingle();
 
     if (profileError || !anggota) {
-      return redirect(`/login?error=${encodeURIComponent('Profil akun tidak ditemukan. Minta admin menghubungkan akun dengan data krama.')}`, 303);
+      return redirect(`/login?error=${encodeURIComponent('Profil akun tidak ditemukan.')}`, 303);
     }
     const cookieOptions = {
       path: '/',
@@ -132,7 +132,7 @@ export const POST: APIRoute = async ({ request, cookies, redirect }) => {
     }
     return redirect(targetPath, 302);
   } catch (err: any) {
-    const message = typeof err?.message === 'string' ? err.message : 'Terjadi kesalahan server';
+    const message = typeof err?.message === 'string' ? err.message : 'Terjadi kesalahan sistem. Coba beberapa saat lagi.';
     return redirect(`/login?error=${encodeURIComponent(message)}`, 303);
   }
 };
