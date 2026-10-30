@@ -283,7 +283,7 @@ if (Astro.request.method === 'POST') {
 
       const { data: tagihan, error: tagihanError } = await privilegedSupabase
         .from('tagihan_krama')
-        .select('id, anggota_id, jenis_tagihan, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, status_aktif)')
+        .select('id, anggota_id, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, status_aktif)')
         .eq('id', tagihanId)
         .maybeSingle();
       if (tagihanError) throw tagihanError;
@@ -627,7 +627,7 @@ if (listTransaksiKasError) errorMessage = `Gagal memuat buku kas: ${listTransaks
 
 const { data: tagihanTahunan } = await privilegedSupabase
   .from('tagihan_krama')
-  .select('id, anggota_id, jenis_tagihan, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, no_hp, status_aktif)');
+  .select('id, anggota_id, keterangan, total_nominal, nominal, jumlah_dibayar, status_bayar, event_adat_id, event:event_adat!tagihan_krama_event_adat_id_fkey(nama_event, jenis_event), anggota!tagihan_krama_anggota_id_fkey(nama_lengkap, no_hp, status_aktif)');
 const anggotaById = new Map((listAnggota || []).map((anggota) => [anggota.id, anggota]));
 const normalizeStatusText = (value: unknown) => String(value || '')
   .trim()
@@ -1217,7 +1217,7 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
                   const nominalTagihan = Number(tagihan.total_nominal ?? tagihan.nominal ?? 0);
                   const sisaTagihan = Math.max(0, nominalTagihan - Number(tagihan.jumlah_dibayar || 0));
                   const eventTahunan = Array.isArray(tagihan.event) ? tagihan.event[0] : tagihan.event;
-                  const namaTagihan = String(tagihan.jenis_tagihan || tagihan.keterangan || eventTahunan?.nama_event || 'Tagihan');
+                  const namaTagihan = String(tagihan.keterangan || eventTahunan?.nama_event || 'Tagihan');
                   return (
                     <li
                       class="numbas-tagihan-option cursor-pointer px-3 py-2 text-xs text-slate-700 hover:bg-emerald-50"
@@ -1258,7 +1258,7 @@ const navRole = (navProfile?.role || '').toUpperCase() === 'ADMIN' ? 'ADMIN' : '
             <input type="text" name="keterangan" placeholder="Contoh: Tunai diterima di balai banjar" class="w-full rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs" />
           </div>
 
-          <button type="submit" disabled={listTagihanTahunanPasif.length === 0} class="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
+          <button type="submit" disabled={anggotaNumbasDenganSaldo.length === 0} class="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-slate-300">
             Simpan Pembayaran Numbas Ayahan
           </button>
         </form>
