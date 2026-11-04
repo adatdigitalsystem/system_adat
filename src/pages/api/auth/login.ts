@@ -70,7 +70,10 @@ export const POST: APIRoute = async ({ request, cookies, redirect }) => {
       }
       const storedPhoneDigits = anggota[0].no_hp?.replace(/\D/g, '') || digits;
       email = anggota[0].email?.trim().toLowerCase() || '';
-      if (anggota[0].user_id && import.meta.env.SUPABASE_SERVICE_ROLE_KEY) {
+      
+      // ✅ Diperbarui: Mendukung SUPABASE_SECRET_KEY atau SUPABASE_SERVICE_ROLE_KEY
+      const hasAdminKey = import.meta.env.SUPABASE_SECRET_KEY || import.meta.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (anggota[0].user_id && hasAdminKey) {
         const supabaseAdmin = createSupabaseAdminClient();
         const { data: authAccount, error: authAccountError } = await supabaseAdmin.auth.admin.getUserById(anggota[0].user_id);
         if (authAccountError) throw authAccountError;
