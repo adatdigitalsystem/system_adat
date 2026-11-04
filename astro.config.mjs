@@ -5,7 +5,10 @@ import cloudflare from '@astrojs/cloudflare';
 // https://astro.build/config
 export default defineConfig({
   output: 'server',
-  adapter: cloudflare(),
+  adapter: cloudflare({
+    // Menonaktifkan session KV otomatis jika tidak menggunakan fitur KV Cloudflare
+    imageService: 'compile'
+  }),
   vite: {
     plugins: [tailwindcss()],
   },
